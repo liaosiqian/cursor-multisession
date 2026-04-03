@@ -46,32 +46,65 @@ npm run dev
 # 每次自动部署后 Cmd+Shift+P -> "Reload Window"
 ```
 
-## 验证部署
+## 验证部署（按优先级排序）
 
-### 1. UI 版本号
-面板底部右下角显示版本号（如 `v0.5.1`）。
+### 1. 查看 Output Channel 日志（第一步！必做！）
 
-### 2. Output Channel 日志
-`View > Output` -> 选择 "MultiSession"：
+**每次部署后、排查问题时，第一步永远是看日志。**
+
+查看方式：
+- Cursor 菜单 `View > Output`（或 `Cmd+Shift+U`）
+- 右上角下拉框选择 **"MultiSession"**
+- 日志实时输出，包含插件激活、面板渲染、WeChat 引擎状态等全部信息
+
+Agent 查看方式（自动化）：
+```bash
+# 读取 Cursor 的 exthost 日志（搜索 multisession 相关）
+rg -i "multisession|cursor-multisession|activate.*error" \
+  ~/Library/Application\ Support/Cursor/logs/*/window*/exthost/exthost.log \
+  --max-count 20
+
+# 或直接读最新的 exthost.log
+ls -t ~/Library/Application\ Support/Cursor/logs/*/window*/exthost/exthost.log | head -1 | xargs tail -50
 ```
-[activate] MultiSession v0.5.1 (PROD)
-[activate] extensionPath: ~/.cursor/extensions/local.cursor-multisession-0.5.1
-[activate] done — v0.5.1 ready
+
+正常日志应包含：
+```
+[activate] MultiSession v0.6.0 (PROD)
+[activate] extensionPath: ~/.cursor/extensions/local.cursor-multisession-0.6.0
+[activate] dataRoot: ~/.multisession
+[activate] MultiSession panel provider registered
+[activate] WeChat panel provider registered
+[activate] polling started
+[activate] done — v0.6.0 ready
+[wechat] panel resolved
+[webview] scriptUri: https://file%2B.vscode-resource...
 [webview] panel resolved
 ```
 
-### 3. 浏览器独立验证（关键！）
-用 `test-webview.html` 在浏览器中独立验证 webview 渲染：
+**如果日志不包含 `done — v0.6.0 ready`，说明激活中断，需要看具体报错行。**
+**如果日志不包含 `[webview] panel resolved`，说明 MultiSession 面板没有被打开过。**
+**如果日志不包含 `[wechat] panel resolved`，说明 WeChat 面板没有被打开过。**
+
+### 2. UI 版本号
+MultiSession 面板底部右下角显示版本号（如 `v0.6.0`）。
+
+### 3. 浏览器独立验证（面板空白时使用）
+
+用 test HTML 在浏览器中独立验证面板渲染，**不需要 Reload Window**：
 ```bash
 npx serve . -l 3456
-# 打开 http://localhost:3456/test-webview.html
-# 检查 Console 有无 JS 错误
+# MultiSession 面板：http://localhost:3456/test-webview.html
+# WeChat 面板：    http://localhost:3456/test-wechat.html
+# F12 查看 Console 是否有 JS 错误
 ```
+
+**规则：每次修改 getHtml() 中的内联 HTML/JS 后，必须先用 test HTML 在浏览器验证通过，再部署到 Cursor。**
 
 ### 4. 文件大小检查
 ```bash
 ls -la ~/.cursor/extensions/local.cursor-multisession-*/dist/
-# extension.js     ~29kb  (主入口，不含 WeChat)
+# extension.js     ~92kb  (主入口 + qrcode 库，不含 WeChat engine)
 # wechat-engine.js ~39kb  (WeChat 独立 bundle，懒加载)
 # webview.js       ~152kb (React UI)
 ```
@@ -123,12 +156,21 @@ deploy.js 会先删除 `~/.cursor/extensions/` 中所有旧版本再拷贝新文
 WeChat engine 引入 `node:crypto`/`node:http` 等模块。在 extension host 中若模块加载阶段产生副作用会导致整个插件激活失败。
 **规则**：WeChat 代码必须懒加载（dynamic import 或延迟 require），不能在顶层 import。
 
-## 故障排查
+## 故障排查流程（严格按顺序）
+
+**排查任何问题时，必须先做第 1 步和第 2 步，然后再看后面的表格。禁止跳过。**
+
+1. **查日志**：`View > Output > MultiSession`，查看最后 20 行，确认激活状态和错误信息
+2. **查版本**：`ls ~/.cursor/extensions/ | grep multisession`，确认部署的版本号正确
+3. 根据症状查下表：
 
 | 症状 | 检查方法 |
 |------|----------|
-| 面板空白 | 浏览器打开 test-webview.html + Console 检查 JS 错误 |
+| 面板空白 | 先看 Output 日志确认 `panel resolved`，然后用 test-webview.html 在浏览器中验证 |
+| WeChat 面板异常 | 先看 Output 日志中 `[wechat]` 前缀的行，然后用 test-wechat.html 验证 |
 | 版本不更新 | `ls ~/.cursor/extensions/ \| grep multisession` |
-| 激活失败 | `View > Output` 选 "MultiSession"；或查看 `~/Library/Application Support/Cursor/logs/*/window*/exthost/exthost.log` |
+| 激活失败 | Output 日志中看具体报错行；或 `~/Library/Application Support/Cursor/logs/*/window*/exthost/exthost.log` |
 | Webview 资源加载失败 | Output 日志中查看 `[webview] scriptUri:` 路径是否正确 |
-| minify 后神秘 JS 报错 | 不加 `--minify` 重新编译 webview，用浏览器查看原始错误 |
+| minify 后神秘 JS 报错 | 不加 `--minify` 重新编译，用浏览器查看原始错误 |
+| QR 码不显示 | Output 日志中查看 `[wechat] QR` 开头的行，确认 URL 类型和 fetch 结果 |
+| WeChat 登录/连接失败 | Output 日志中查看 `[wechat:账号名]` 前缀的行 |
