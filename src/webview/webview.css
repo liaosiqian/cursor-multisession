@@ -1,0 +1,732 @@
+:root {
+	--bg: var(--vscode-editor-background, #1e1e1e);
+	--fg: var(--vscode-editor-foreground, #cccccc);
+	--border: var(--vscode-panel-border, #333);
+	--accent: var(--vscode-button-background, #0078d4);
+	--accent-hover: var(--vscode-button-hoverBackground, #106ebe);
+	--input-bg: var(--vscode-input-background, #3c3c3c);
+	--input-border: var(--vscode-input-border, #555);
+	--badge-bg: var(--vscode-badge-background, #4d4d4d);
+	--badge-fg: var(--vscode-badge-foreground, #fff);
+	--tab-active: var(--vscode-tab-activeBackground, #1e1e1e);
+	--tab-inactive: var(--vscode-tab-inactiveBackground, #2d2d2d);
+	--success: #4caf50;
+	--warning: #ff9800;
+	--muted: var(--vscode-descriptionForeground, #888);
+}
+
+* {
+	margin: 0;
+	padding: 0;
+	box-sizing: border-box;
+}
+
+body {
+	font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, sans-serif);
+	font-size: var(--vscode-font-size, 13px);
+	color: var(--fg);
+	background: var(--bg);
+	overflow: hidden;
+}
+
+.app {
+	display: flex;
+	flex-direction: column;
+	height: 100vh;
+}
+
+/* ── TopBar ── */
+
+.topbar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 6px 10px;
+	border-bottom: 1px solid var(--border);
+	flex-shrink: 0;
+}
+
+.topbar-left {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.topbar-right {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.topbar-title {
+	font-weight: 600;
+	font-size: 12px;
+}
+
+.status-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	flex-shrink: 0;
+}
+
+.status-dot.connected {
+	background: var(--success);
+	box-shadow: 0 0 4px var(--success);
+}
+
+.status-dot.disconnected {
+	background: #666;
+}
+
+.btn-small {
+	padding: 2px 8px;
+	font-size: 11px;
+	border: 1px solid var(--border);
+	background: transparent;
+	color: var(--fg);
+	border-radius: 3px;
+	cursor: pointer;
+}
+
+.btn-small:hover {
+	background: var(--input-bg);
+}
+
+.btn-accent {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+
+.btn-accent:hover {
+	background: var(--accent);
+	color: #fff;
+}
+
+.badge {
+	background: var(--warning);
+	color: #000;
+	font-size: 10px;
+	font-weight: 700;
+	padding: 1px 5px;
+	border-radius: 8px;
+	min-width: 16px;
+	text-align: center;
+}
+
+/* ── Notice ── */
+
+.notice {
+	padding: 6px 10px;
+	background: rgba(255, 152, 0, 0.15);
+	border-bottom: 1px solid var(--border);
+	font-size: 11px;
+	color: var(--warning);
+	flex-shrink: 0;
+}
+
+.btn-link {
+	background: none;
+	border: none;
+	color: var(--accent);
+	cursor: pointer;
+	text-decoration: underline;
+	font-size: 11px;
+}
+
+.btn-install {
+	display: block;
+	margin-top: 6px;
+	padding: 4px 12px;
+	background: var(--accent);
+	color: #fff;
+	border: none;
+	border-radius: 3px;
+	cursor: pointer;
+	font-size: 11px;
+}
+
+.btn-install:hover {
+	background: var(--accent-hover);
+}
+
+/* ── Session Tabs ── */
+
+.session-tabs {
+	display: flex;
+	overflow-x: auto;
+	border-bottom: 1px solid var(--border);
+	flex-shrink: 0;
+}
+
+.session-tabs::-webkit-scrollbar {
+	height: 2px;
+}
+
+.session-tab {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 5px 10px;
+	font-size: 11px;
+	cursor: pointer;
+	border-bottom: 2px solid transparent;
+	background: var(--tab-inactive);
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+.session-tab:hover {
+	background: var(--tab-active);
+}
+
+.session-tab.active {
+	background: var(--tab-active);
+	border-bottom-color: var(--accent);
+}
+
+.tab-name {
+	max-width: 120px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.tab-badge {
+	background: var(--accent);
+	color: #fff;
+	font-size: 9px;
+	padding: 0 4px;
+	border-radius: 6px;
+	min-width: 14px;
+	text-align: center;
+}
+
+.tab-close {
+	background: none;
+	border: none;
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 14px;
+	line-height: 1;
+	padding: 0 2px;
+}
+
+.tab-close:hover {
+	color: var(--fg);
+}
+
+/* ── Message Log ── */
+
+.message-log {
+	flex: 1;
+	overflow-y: auto;
+	padding: 8px;
+}
+
+.message-log::-webkit-scrollbar {
+	width: 4px;
+}
+
+.message-log::-webkit-scrollbar-thumb {
+	background: var(--border);
+	border-radius: 2px;
+}
+
+.empty-state {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	height: 100%;
+	gap: 8px;
+	color: var(--muted);
+	text-align: center;
+}
+
+.empty-state .hint {
+	font-size: 11px;
+}
+
+.btn-primary {
+	padding: 6px 16px;
+	background: var(--accent);
+	color: #fff;
+	border: none;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.btn-primary:hover {
+	background: var(--accent-hover);
+}
+
+.message {
+	margin-bottom: 8px;
+	padding: 6px 10px;
+	border-radius: 6px;
+	font-size: 12px;
+	line-height: 1.5;
+}
+
+.message-user {
+	background: rgba(0, 120, 212, 0.12);
+	border-left: 3px solid var(--accent);
+}
+
+.message-ai {
+	background: rgba(76, 175, 80, 0.08);
+	border-left: 3px solid var(--success);
+}
+
+.message-pending {
+	background: rgba(255, 152, 0, 0.08);
+	border-left: 3px solid var(--warning);
+	opacity: 0.7;
+}
+
+.message-role {
+	font-size: 10px;
+	font-weight: 600;
+	color: var(--muted);
+	margin-bottom: 2px;
+}
+
+.message-text {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.msg-image-ref {
+	display: inline-block;
+	background: var(--input-bg);
+	padding: 1px 6px;
+	border-radius: 3px;
+	font-size: 11px;
+	cursor: default;
+}
+
+.message-time {
+	font-size: 9px;
+	color: var(--muted);
+	margin-top: 2px;
+	text-align: right;
+}
+
+.pending-section {
+	margin-top: 8px;
+}
+
+.pending-label {
+	font-size: 10px;
+	color: var(--warning);
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+
+.message-pending {
+	position: relative;
+}
+
+.pending-actions {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	display: none;
+	gap: 2px;
+}
+
+.message-pending:hover .pending-actions {
+	display: flex;
+}
+
+.pending-action-btn {
+	background: none;
+	border: 1px solid var(--border);
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 12px;
+	width: 22px;
+	height: 22px;
+	border-radius: 3px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+}
+
+.pending-action-btn:hover {
+	color: var(--fg);
+	background: var(--input-bg);
+}
+
+.pending-action-delete:hover {
+	color: #f44336;
+	border-color: #f44336;
+}
+
+.pending-action-send:hover {
+	color: var(--accent);
+	border-color: var(--accent);
+}
+
+.pending-edit {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.pending-edit-textarea {
+	width: 100%;
+	resize: vertical;
+	background: var(--input-bg);
+	color: var(--fg);
+	border: 1px solid var(--accent);
+	border-radius: 3px;
+	padding: 4px 6px;
+	font-family: inherit;
+	font-size: 12px;
+	line-height: 1.4;
+	outline: none;
+}
+
+.pending-edit-actions {
+	display: flex;
+	gap: 4px;
+	justify-content: flex-end;
+}
+
+/* ── Summary Toast (non-blocking) ── */
+
+.summary-toast {
+	margin: 6px 8px 0;
+	background: var(--bg);
+	border: 1px solid var(--accent);
+	border-radius: 6px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+	flex-shrink: 0;
+	max-height: 35vh;
+	overflow-y: auto;
+}
+
+.summary-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 6px 10px;
+	border-bottom: 1px solid var(--border);
+	font-weight: 600;
+	font-size: 11px;
+	position: sticky;
+	top: 0;
+	background: var(--bg);
+	z-index: 1;
+}
+
+.summary-actions {
+	display: flex;
+	gap: 4px;
+	align-items: center;
+}
+
+.summary-body {
+	padding: 8px 10px;
+	font-size: 12px;
+	line-height: 1.6;
+	word-break: break-word;
+}
+
+.summary-body .md-h1 {
+	display: block;
+	font-size: 15px;
+	margin: 6px 0 4px;
+}
+
+.summary-body .md-h2 {
+	display: block;
+	font-size: 13px;
+	margin: 4px 0 2px;
+}
+
+.summary-body .md-h3 {
+	display: block;
+	font-size: 12px;
+	margin: 4px 0 2px;
+}
+
+.summary-body .md-code-block {
+	display: block;
+	background: var(--input-bg);
+	padding: 6px 8px;
+	border-radius: 4px;
+	margin: 4px 0;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 11px;
+	overflow-x: auto;
+	white-space: pre;
+}
+
+.summary-body .md-inline-code {
+	background: var(--input-bg);
+	padding: 1px 4px;
+	border-radius: 3px;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 11px;
+}
+
+.summary-body .md-li {
+	display: block;
+	padding-left: 12px;
+	position: relative;
+}
+
+.summary-body .md-li::before {
+	content: '•';
+	position: absolute;
+	left: 2px;
+	color: var(--accent);
+}
+
+/* ── Inquiry Form ── */
+
+.inquiry-section {
+	padding: 8px;
+	border-top: 1px solid var(--border);
+	background: rgba(0, 120, 212, 0.05);
+	flex-shrink: 0;
+}
+
+.inquiry-label {
+	font-size: 10px;
+	font-weight: 600;
+	color: var(--accent);
+	margin-bottom: 6px;
+}
+
+.inquiry-question {
+	margin-bottom: 8px;
+}
+
+.inquiry-q-text {
+	font-size: 12px;
+	font-weight: 500;
+	margin-bottom: 4px;
+}
+
+.inquiry-options {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin-bottom: 4px;
+}
+
+.inquiry-option {
+	padding: 3px 10px;
+	font-size: 11px;
+	border: 1px solid var(--border);
+	background: transparent;
+	color: var(--fg);
+	border-radius: 12px;
+	cursor: pointer;
+}
+
+.inquiry-option:hover {
+	border-color: var(--accent);
+}
+
+.inquiry-option.selected {
+	background: var(--accent);
+	color: #fff;
+	border-color: var(--accent);
+}
+
+.inquiry-text-input {
+	width: 100%;
+	padding: 4px 8px;
+	font-size: 11px;
+	background: var(--input-bg);
+	color: var(--fg);
+	border: 1px solid var(--input-border);
+	border-radius: 3px;
+	outline: none;
+}
+
+.inquiry-text-input:focus {
+	border-color: var(--accent);
+}
+
+/* ── Shared Files ── */
+
+.shared-files {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	padding: 4px 8px;
+	border-top: 1px solid var(--border);
+	flex-shrink: 0;
+}
+
+.file-tag {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 6px;
+	background: var(--input-bg);
+	border-radius: 3px;
+	font-size: 11px;
+}
+
+.file-tag button {
+	background: none;
+	border: none;
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 12px;
+	padding: 0;
+}
+
+/* ── Image Preview ── */
+
+.image-preview-bar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	padding: 4px 8px;
+	border-top: 1px solid var(--border);
+	flex-shrink: 0;
+}
+
+.image-preview-item {
+	position: relative;
+	width: 48px;
+	height: 48px;
+	border-radius: 4px;
+	overflow: hidden;
+	border: 1px solid var(--border);
+}
+
+.image-preview-thumb {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+}
+
+.image-preview-remove {
+	position: absolute;
+	top: -1px;
+	right: -1px;
+	width: 16px;
+	height: 16px;
+	background: rgba(0, 0, 0, 0.6);
+	color: #fff;
+	border: none;
+	border-radius: 0 0 0 4px;
+	font-size: 10px;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	line-height: 1;
+}
+
+.image-preview-remove:hover {
+	background: #f44336;
+}
+
+/* ── Input Area ── */
+
+.input-area {
+	display: flex;
+	gap: 4px;
+	padding: 8px;
+	border-top: 1px solid var(--border);
+	flex-shrink: 0;
+	align-items: flex-end;
+}
+
+.btn-image {
+	background: none;
+	border: 1px solid var(--border);
+	color: var(--muted);
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 14px;
+	width: 30px;
+	height: 30px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	flex-shrink: 0;
+}
+
+.btn-image:hover {
+	border-color: var(--accent);
+	color: var(--fg);
+}
+
+.input-textarea {
+	flex: 1;
+	resize: none;
+	background: var(--input-bg);
+	color: var(--fg);
+	border: 1px solid var(--input-border);
+	border-radius: 4px;
+	padding: 6px 8px;
+	font-family: inherit;
+	font-size: 12px;
+	line-height: 1.4;
+	outline: none;
+}
+
+.input-textarea:focus {
+	border-color: var(--accent);
+}
+
+.input-textarea::placeholder {
+	color: var(--muted);
+}
+
+.btn-send {
+	padding: 6px 14px;
+	background: var(--accent);
+	color: #fff;
+	border: none;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 12px;
+	align-self: flex-end;
+}
+
+.btn-send:hover:not(:disabled) {
+	background: var(--accent-hover);
+}
+
+.btn-send:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+/* ── System Messages (slash command results) ── */
+
+.message-system {
+	background: rgba(136, 136, 136, 0.08);
+	border-left: 3px solid var(--muted);
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 11px;
+}
+
+/* ── Tab Rename Input ── */
+
+.tab-rename-input {
+	width: 80px;
+	padding: 1px 4px;
+	font-size: 11px;
+	background: var(--input-bg);
+	color: var(--fg);
+	border: 1px solid var(--accent);
+	border-radius: 2px;
+	outline: none;
+	font-family: inherit;
+}
