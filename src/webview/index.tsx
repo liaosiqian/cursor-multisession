@@ -87,6 +87,7 @@ function App() {
 	const [summaryMap, setSummaryMap] = useState<Record<string, SummaryData>>(savedState.summaryMap ?? {});
 	const [inquirySelections, setInquirySelections] = useState<Record<string, string[]>>({});
 	const [inquiryTexts, setInquiryTexts] = useState<Record<string, string>>({});
+	const [extVersion, setExtVersion] = useState<string>((window as any).__EXT_VERSION__ || '?');
 
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const messageLogRef = useRef<HTMLDivElement>(null);
@@ -179,6 +180,9 @@ function App() {
 					return { ...prev, [msg.sessionId]: logs };
 				});
 				break;
+			case 'extensionInfo':
+				if (msg.version) setExtVersion(msg.version);
+				break;
 			}
 		};
 		window.addEventListener('message', handler);
@@ -265,6 +269,13 @@ function App() {
 		}
 	}, [activeSessionId, sessions]);
 
+	const [summaryCollapsed, setSummaryCollapsed] = useState(false);
+	const [editingPendingId, setEditingPendingId] = useState<string | null>(null);
+	const [editingPendingText, setEditingPendingText] = useState('');
+	const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+	const [renameText, setRenameText] = useState('');
+	const renameInputRef = useRef<HTMLInputElement>(null);
+
 	const handleStartRename = useCallback((sid: string, currentName: string) => {
 		setRenamingSessionId(sid);
 		setRenameText(currentName);
@@ -310,13 +321,6 @@ function App() {
 			return { ...prev, [qIdx]: [optId] };
 		});
 	}, []);
-
-	const [summaryCollapsed, setSummaryCollapsed] = useState(false);
-	const [editingPendingId, setEditingPendingId] = useState<string | null>(null);
-	const [editingPendingText, setEditingPendingText] = useState('');
-	const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
-	const [renameText, setRenameText] = useState('');
-	const renameInputRef = useRef<HTMLInputElement>(null);
 
 	const dismissSummary = useCallback((sid: string) => {
 		setSummaryMap(prev => { const n = { ...prev }; delete n[sid]; return n; });
@@ -658,11 +662,23 @@ function App() {
 					发送
 				</button>
 			</div>
+			<div className="version-footer">v{extVersion}</div>
 		</div>
 	);
 }
 
 // ── mount ──
 
-const root = createRoot(document.getElementById('root')!);
-root.render(<App />);
+try {
+	const el = document.getElementById('root');
+	if (!el) throw new Error('root element not found');
+	const root = createRoot(el);
+	root.render(<App />);
+} catch (err: any) {
+	const el = document.getElementById('root') || document.body;
+	el.innerHTML = `<div style="padding:16px;color:#f44;font-size:13px;font-family:monospace;">
+		<p><strong>MultiSession render error</strong></p>
+		<pre style="white-space:pre-wrap;">${err?.message || err}</pre>
+		<pre style="white-space:pre-wrap;font-size:11px;opacity:0.7;">${err?.stack || ''}</pre>
+	</div>`;
+}

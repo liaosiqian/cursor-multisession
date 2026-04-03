@@ -2,7 +2,7 @@
 	"name": "cursor-multisession",
 	"displayName": "MultiSession + WeChat",
 	"description": "Cursor AI 多会话管理面板 + 微信桥接",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"publisher": "local",
 	"license": "MIT",
 	"engines": {
@@ -87,12 +87,16 @@
 		}
 	},
 	"scripts": {
-		"compile:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+		"compile:wechat": "esbuild src/wechat/engine.ts --bundle --outfile=dist/wechat-engine.js --format=cjs --platform=node --minify",
+		"compile:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:./wechat-engine.js --format=cjs --platform=node --minify",
 		"compile:css": "node -e \"require('fs').copyFileSync('src/webview/webview.css','dist/webview.css')\"",
 		"compile:webview": "esbuild src/webview/index.tsx --bundle --outfile=dist/webview.js --format=iife --platform=browser --minify && npm run compile:css",
 		"compile:mcp": "esbuild mcp-server/index.ts --bundle --outfile=dist/mcp-server.mjs --format=esm --platform=node --minify",
-		"compile": "npm run compile:ext && npm run compile:webview && npm run compile:mcp",
+		"compile": "npm run compile:wechat && npm run compile:ext && npm run compile:webview && npm run compile:mcp",
 		"build": "npm run compile",
+		"watch:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --watch",
+		"watch:webview": "esbuild src/webview/index.tsx --bundle --outfile=dist/webview.js --format=iife --platform=browser --watch",
+		"watch": "npm run compile:css && npm run watch:ext & npm run watch:webview",
 		"deploy": "npm run build && node scripts/deploy.js",
 		"dev": "node scripts/watch.js",
 		"package": "npm run build && npx @vscode/vsce package --no-dependencies"

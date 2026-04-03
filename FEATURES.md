@@ -22,23 +22,33 @@
 | 10 | fs.watch 即时刷新 | ✅ 已部署 | 监听 `sessions.json` 变更，即时同步面板状态 |
 | 11 | Reconnect | ✅ 已部署 | 调用 `composer.resumeCurrentChat` 尝试重连 |
 
-## 二、面板端 Slash Commands（源码已实现，需编译部署验证）
+## 二、面板端 Slash Commands（已编译部署 v0.5.1）
 
 | # | 命令 | 状态 | 说明 |
 |---|------|------|------|
-| 1 | `/status` | ⚠️ 待验证 | 显示当前 session 状态、待处理消息数、AI 最后回复时间 |
-| 2 | `/ping` | ⚠️ 待验证 | 快速连通性检查 |
-| 3 | `/help` | ⚠️ 待验证 | 列出所有可用命令 |
-| 4 | `/session` | ⚠️ 待验证 | 列出所有活跃 session |
-| 5 | `/rename <name>` | ⚠️ 待验证 | 重命名当前 session |
+| 1 | `/status` | ✅ 已部署 | 显示当前 session 状态、待处理消息数、AI 最后回复时间 |
+| 2 | `/ping` | ✅ 已部署 | 快速连通性检查 |
+| 3 | `/help` | ✅ 已部署 | 列出所有可用命令 |
+| 4 | `/session` | ✅ 已部署 | 列出所有活跃 session |
+| 5 | `/rename <name>` | ✅ 已部署 | 重命名当前 session |
 
-## 三、Session 重命名（源码已实现，需编译部署验证）
+## 三、Session 重命名（已编译部署 v0.5.1）
 
 | # | 功能 | 状态 | 说明 |
 |---|------|------|------|
-| 1 | 面板内双击重命名 | ⚠️ 待验证 | 双击 session tab 弹出编辑框 |
-| 2 | `/rename` 命令 | ⚠️ 待验证 | 通过 slash command 重命名 |
-| 3 | `renameSession` 消息 | ⚠️ 待验证 | webview -> extension 消息处理 |
+| 1 | 面板内双击重命名 | ✅ 已部署 | 双击 session tab 弹出编辑框 |
+| 2 | `/rename` 命令 | ✅ 已部署 | 通过 slash command 重命名 |
+| 3 | `renameSession` 消息 | ✅ 已部署 | webview -> extension 消息处理 |
+
+## 三-B、v0.5.1 新增（开发体验）
+
+| # | 功能 | 状态 | 说明 |
+|---|------|------|------|
+| 1 | 版本号显示 | ✅ 已部署 | 面板右下角显示当前版本号 |
+| 2 | 增强启动日志 | ✅ 已部署 | Output Channel 显示版本、路径、组件注册状态 |
+| 3 | F5 调试支持 | ✅ 已部署 | `.vscode/launch.json` + `.vscode/tasks.json` |
+| 4 | Webview 热更新 | ✅ 已部署 | DEV 模式下 FileSystemWatcher 自动刷新 webview |
+| 5 | 浏览器独立验证 | ✅ 已部署 | `test-webview.html` 可在浏览器中验证 webview 渲染 |
 
 ## 四、WeChat ClawBot 集成（源码已实现，尚未成功编译部署）
 
@@ -46,49 +56,49 @@
 
 | # | 功能 | 状态 | 说明 |
 |---|------|------|------|
-| 1 | 扫码登录 | ❌ 未部署 | 调用 iLink API 获取 QR code，面板内展示 |
-| 2 | 凭证持久化 | ❌ 未部署 | 保存到 `~/.clawbot/credentials.json` |
+| 1 | 扫码登录 | ✅ 已部署 v0.6.0 | 调用 iLink API 获取 QR code，面板内展示 |
+| 2 | 凭证持久化 | ✅ 已部署 v0.6.0 | 保存到 `~/.clawbot/credentials.json` |
 | 3 | 自动重连 | ❌ 未部署 | 启动时检测凭证，自动连接 |
-| 4 | 状态栏指示器 | ❌ 未部署 | 底部状态栏显示 WeChat 连接状态 |
+| 4 | 状态栏指示器 | ✅ 已部署 v0.6.0 | 底部状态栏显示 WeChat 连接状态 |
 
 ### 4.2 消息桥接
 
 | # | 功能 | 状态 | 说明 |
 |---|------|------|------|
-| 1 | 微信消息 → MultiSession | ❌ 未部署 | 消息轮询 + 路由到指定 session 的 `queue.json` |
-| 2 | AI 回复 → 微信 | ❌ 未部署 | SessionWatcherManager 监听 `summary.json`，自动发送到微信 |
-| 3 | Inquiry 转发 | ❌ 未部署 | AI 的 `ask_question` 自动推送到微信，微信回复自动应答 |
-| 4 | 多 session 路由 | ❌ 未部署 | `/use <name>` 切换微信消息目标 session |
-| 5 | 消息前缀 | ❌ 未部署 | 不同 session 的回复自动带 `[session_name]` 前缀 |
+| 1 | 微信消息 → MultiSession | ✅ 已部署 v0.6.0 | 消息轮询 + 路由到指定 session 的 `queue.json` |
+| 2 | AI 回复 → 微信 | ✅ 已部署 v0.6.0 | SessionWatcherManager 监听 `summary.json`，自动发送到微信 |
+| 3 | Inquiry 转发 | ✅ 已部署 v0.6.0 | AI 的 `ask_question` 自动推送到微信，微信回复自动应答 |
+| 4 | 多 session 路由 | ✅ 已部署 v0.6.0 | `/use <name>` 切换微信消息目标 session |
+| 5 | 消息前缀 | ✅ 已部署 v0.6.0 | 不同 session 的回复自动带 `[session_name]` 前缀 |
 
 ### 4.3 微信端 Slash Commands
 
 | # | 命令 | 状态 | 说明 |
 |---|------|------|------|
-| 1 | `/status` | ❌ 未部署 | 查看连接状态、AI 回复状态 |
-| 2 | `/sessions` | ❌ 未部署 | 列出所有 MultiSession session |
-| 3 | `/use <name>` | ❌ 未部署 | 切换当前活跃 session |
-| 4 | `/rename <name>` | ❌ 未部署 | 重命名 session |
-| 5 | `/ping` | ❌ 未部署 | 快速连通性检查 |
+| 1 | `/status` | ✅ 已部署 v0.6.0 | 查看连接状态、AI 回复状态 |
+| 2 | `/sessions` | ✅ 已部署 v0.6.0 | 列出所有 MultiSession session |
+| 3 | `/use <name>` | ✅ 已部署 v0.6.0 | 切换当前活跃 session |
+| 4 | `/rename <name>` | ✅ 已部署 v0.6.0 | 重命名 session |
+| 5 | `/ping` | ✅ 已部署 v0.6.0 | 快速连通性检查 |
 
 ### 4.4 媒体能力
 
 | # | 功能 | 状态 | 说明 |
 |---|------|------|------|
-| 1 | 图片发送 | ❌ 未部署 | AES-128-ECB 加密上传到 CDN，通过 iLink API 发送 |
-| 2 | 图片接收 | ❌ 未部署 | 从微信消息中提取图片，保存到 session images 目录 |
-| 3 | 截图发送 | ❌ 未部署 | 一键截屏并发送到微信 |
-| 4 | 语音接收 | ❌ 未部署 | 从微信消息中提取语音内容 |
+| 1 | 图片发送 | ✅ 已部署 v0.6.0 | AES-128-ECB 加密上传到 CDN，通过 iLink API 发送 |
+| 2 | 图片接收 | ✅ 已部署 v0.6.0 | 从微信消息中提取图片，保存到 session images 目录 |
+| 3 | 截图发送 | ✅ 已部署 v0.6.0 | 一键截屏并发送到微信 |
+| 4 | 语音接收 | ✅ 已部署 v0.6.0 | 从微信消息中提取语音内容 |
 
 ### 4.5 WeChat 面板 UI
 
 | # | 功能 | 状态 | 说明 |
 |---|------|------|------|
-| 1 | 状态展示 | ❌ 未部署 | 离线/连接中/已连接/错误 状态 badge |
-| 2 | QR 码展示 | ❌ 未部署 | 扫码登录二维码 |
+| 1 | 状态展示 | ✅ 已部署 v0.6.0 | 离线/连接中/已连接/错误 状态 badge + 动画 |
+| 2 | QR 码展示 | ✅ 已部署 v0.6.0 | 扫码登录二维码（面板内展示） |
 | 3 | 消息日志 | ❌ 未部署 | 最近 50 条消息记录 |
 | 4 | AI 回复状态 | ❌ 未部署 | "AI is thinking..." / "已回复: ..." |
-| 5 | 连接/断开按钮 | ❌ 未部署 | 操作按钮 |
+| 5 | 连接/断开按钮 | ✅ 已部署 v0.6.0 | 扫码登录 / 连接 / 断开 按钮 |
 
 ---
 
@@ -96,10 +106,11 @@
 
 | # | 问题 | 原因 | 状态 |
 |---|------|------|------|
-| 1 | 包含 WeChat engine 的编译产物导致面板白屏 | WeChat engine 引入 `node:crypto`/`node:http` 等模块，可能在模块加载阶段触发副作用崩溃 | 🔴 未解决 |
-| 2 | deploy 脚本未正确覆盖安装目录文件 | `npm run build` 与手动编译冲突，文件可能被 Cursor 进程锁定 | 🔴 未解决 |
-| 3 | `cursor --install-extension` CLI 报 helper app 错误 | macOS 上 Cursor CLI helper app 路径问题 | ⚠️ 需用 "Install from VSIX" 代替 |
+| 1 | ~~面板白屏~~ | `renamingSessionId` 变量 TDZ 错误（`useCallback` 在 `useState` 之前引用） | ✅ 已修复 v0.5.1 |
+| 2 | ~~deploy 脚本未正确覆盖~~ | deploy.js 已改为先清理所有旧版本再拷贝 + 校验 | ✅ 已修复 v0.5.1 |
+| 3 | `cursor --install-extension` CLI 报 helper app 错误 | macOS Electron CLI 路径问题 | ⚠️ 用 `npm run deploy` 或 "Install from VSIX" 代替 |
 | 4 | QR 码图片无法在 webview 中显示 | webview 默认阻止外部 HTTPS 图片（需 CSP 配置） | 🔴 未解决 |
+| 5 | WeChat engine 可能导致插件激活失败 | `node:crypto`/`node:http` 等模块在顶层 import 产生副作用 | ⚠️ 需用 dynamic import 隔离 |
 
 ---
 
@@ -156,7 +167,9 @@ cursor-multisession/
 
 ## 八、下一步计划
 
-1. **修复 deploy 脚本** -- 确保编译产物正确覆盖安装目录
-2. **验证纯 MultiSession 版本** -- 确认 slash commands + rename 正常工作
+1. ~~修复 deploy 脚本~~ ✅
+2. ~~验证纯 MultiSession 版本~~ ✅（v0.5.1 所有功能已编译部署）
 3. **隔离引入 WeChat** -- 使用 dynamic import 避免模块加载副作用
 4. **解决 QR 码图片** -- 参考 VS Code 官方示例正确配置 CSP + nonce
+5. **WeChat 面板真实 UI** -- 替换 stub，显示连接状态/QR 码/消息日志
+6. **端到端验证** -- 微信消息 ↔ MultiSession 双向桥接

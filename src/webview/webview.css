@@ -730,3 +730,14 @@ body {
 	outline: none;
 	font-family: inherit;
 }
+
+/* ── Version Footer ── */
+
+.version-footer {
+	text-align: right;
+	padding: 2px 8px 4px;
+	font-size: 10px;
+	color: var(--muted);
+	opacity: 0.6;
+	user-select: none;
+}

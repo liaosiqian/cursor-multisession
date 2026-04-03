@@ -3,56 +3,83 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+const srcRoot = path.join(__dirname, '..');
+const pkg = JSON.parse(fs.readFileSync(path.join(srcRoot, 'package.json'), 'utf-8'));
 const version = pkg.version;
 const name = `${pkg.publisher}.${pkg.name}-${version}`;
-const extDir = path.join(os.homedir(), '.cursor', 'extensions', name);
-const srcRoot = path.join(__dirname, '..');
-
-// remove ALL old versions (including current to force clean copy)
 const extParent = path.join(os.homedir(), '.cursor', 'extensions');
+const extDir = path.join(extParent, name);
+
+console.log(`\n  MultiSession Deploy v${version}`);
+console.log(`  ${'─'.repeat(40)}`);
+
+// 1. remove ALL old versions to force clean install
 for (const entry of fs.readdirSync(extParent)) {
   if (entry.startsWith(`${pkg.publisher}.${pkg.name}-`)) {
     const old = path.join(extParent, entry);
     fs.rmSync(old, { recursive: true, force: true });
-    console.log(`  removed: ${entry}`);
+    console.log(`  [clean] removed ${entry}`);
   }
 }
 
-// create fresh target dirs
+// 2. create fresh target dirs
 fs.mkdirSync(path.join(extDir, 'dist'), { recursive: true });
 fs.mkdirSync(path.join(extDir, 'media'), { recursive: true });
 
+// 3. copy files
 const filesToCopy = [
-  ['dist/extension.js', 'dist/extension.js'],
-  ['dist/webview.js', 'dist/webview.js'],
-  ['dist/webview.css', 'dist/webview.css'],
-  ['dist/mcp-server.mjs', 'dist/mcp-server.mjs'],
-  ['package.json', 'package.json'],
-  ['media/icon.svg', 'media/icon.svg'],
+  'dist/extension.js',
+  'dist/wechat-engine.js',
+  'dist/webview.js',
+  'dist/webview.css',
+  'dist/mcp-server.mjs',
+  'package.json',
+  'media/icon.svg',
 ];
 
-for (const [src, dst] of filesToCopy) {
-  const srcPath = path.join(srcRoot, src);
-  const dstPath = path.join(extDir, dst);
+let allOk = true;
+for (const rel of filesToCopy) {
+  const srcPath = path.join(srcRoot, rel);
+  const dstPath = path.join(extDir, rel);
   if (fs.existsSync(srcPath)) {
     fs.copyFileSync(srcPath, dstPath);
-    const stat = fs.statSync(dstPath);
-    console.log(`  ${dst} (${(stat.size / 1024).toFixed(1)}kb)`);
+    const sz = fs.statSync(dstPath).size;
+    console.log(`  [copy] ${rel} (${(sz / 1024).toFixed(1)}kb)`);
   } else {
-    console.warn(`  SKIP: ${src} not found`);
+    console.warn(`  [skip] ${rel} — not found`);
   }
 }
 
-// verify critical file
-const extJs = path.join(extDir, 'dist', 'extension.js');
-const extSize = fs.statSync(extJs).size;
-const srcSize = fs.statSync(path.join(srcRoot, 'dist', 'extension.js')).size;
-if (extSize !== srcSize) {
-  console.error(`\n  ERROR: extension.js size mismatch! src=${srcSize} dst=${extSize}`);
+// 4. verify critical files exist and sizes match
+const criticalFiles = ['dist/extension.js', 'dist/wechat-engine.js', 'dist/webview.js'];
+for (const rel of criticalFiles) {
+  const srcPath = path.join(srcRoot, rel);
+  const dstPath = path.join(extDir, rel);
+  if (!fs.existsSync(dstPath)) {
+    console.error(`  [ERROR] missing: ${rel}`);
+    allOk = false;
+    continue;
+  }
+  const srcSz = fs.statSync(srcPath).size;
+  const dstSz = fs.statSync(dstPath).size;
+  if (srcSz !== dstSz) {
+    console.error(`  [ERROR] size mismatch: ${rel} (src=${srcSz} dst=${dstSz})`);
+    allOk = false;
+  }
+}
+
+// 5. verify version in deployed package.json
+const deployedPkg = JSON.parse(fs.readFileSync(path.join(extDir, 'package.json'), 'utf-8'));
+if (deployedPkg.version !== version) {
+  console.error(`  [ERROR] version mismatch: pkg=${version} deployed=${deployedPkg.version}`);
+  allOk = false;
+}
+
+if (!allOk) {
+  console.error('\n  Deploy FAILED — see errors above.\n');
   process.exit(1);
 }
 
-console.log(`\n  deployed ${name} (extension.js: ${(extSize/1024).toFixed(1)}kb)`);
+console.log(`\n  Deploy OK: ${name}`);
 console.log(`  -> ${extDir}`);
-console.log(`\n  Reload Window (Cmd+Shift+P -> "Reload Window") to activate.\n`);
+console.log(`\n  Next: Cmd+Shift+P -> "Reload Window"\n`);

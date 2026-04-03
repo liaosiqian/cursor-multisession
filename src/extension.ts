@@ -2,9 +2,6 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-// WeChat imports disabled for debugging -- uncomment when webview rendering is confirmed stable
-// import { ClawBotEngine } from './wechat/engine';
-// import { captureAndCleanup } from './wechat/screenshot';
 
 const DATA_ROOT = path.join(os.homedir(), '.multisession');
 const SESSIONS_FILE = path.join(DATA_ROOT, 'sessions.json');
@@ -19,6 +16,8 @@ let panel: vscode.WebviewView | undefined;
 let pollTimer: NodeJS.Timeout | undefined;
 let lastReconnectAttempt = 0;
 let output: vscode.OutputChannel;
+let EXT_VERSION = '?';
+let IS_DEV = false;
 
 // ── 通信规则提示词（粘贴到 Composer 用） ──
 
@@ -300,6 +299,7 @@ function syncState() {
 	panel.webview.postMessage({ type: 'mcpConfigured', data: isMcpConfigured() });
 	panel.webview.postMessage({ type: 'workspacePaths', data: getWorkspacePaths() });
 	panel.webview.postMessage({ type: 'rulePrompt', data: RULE_PROMPT });
+	panel.webview.postMessage({ type: 'extensionInfo', version: EXT_VERSION, isDev: IS_DEV });
 }
 
 // ── MCP config ──
@@ -436,6 +436,7 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 		view.webview.html = this.getHtml(view.webview);
 
 		markThisWindowActive();
+		this.setupDevHotReload(view);
 
 		view.onDidChangeVisibility(() => {
 			if (view.visible) syncState();
@@ -615,6 +616,28 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 		output.appendLine('[webview] panel resolved');
 	}
 
+	private setupDevHotReload(view: vscode.WebviewView) {
+		if (this.ctx.extensionMode !== vscode.ExtensionMode.Development) return;
+
+		const pattern = new vscode.RelativePattern(this.ctx.extensionUri, 'dist/webview.{js,css}');
+		const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+		let timer: NodeJS.Timeout;
+
+		const reload = () => {
+			clearTimeout(timer);
+			timer = setTimeout(() => {
+				if (view.visible) {
+					output.appendLine('[hot-reload] webview files changed, refreshing');
+					view.webview.html = this.getHtml(view.webview);
+				}
+			}, 300);
+		};
+
+		watcher.onDidChange(reload);
+		this.ctx.subscriptions.push(watcher);
+		output.appendLine('[dev] webview hot-reload watcher enabled');
+	}
+
 	private getHtml(webview: vscode.Webview): string {
 		const scriptUri = webview.asWebviewUri(
 			vscode.Uri.joinPath(this.ctx.extensionUri, 'dist', 'webview.js')
@@ -622,36 +645,181 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 		const cssUri = webview.asWebviewUri(
 			vscode.Uri.joinPath(this.ctx.extensionUri, 'dist', 'webview.css')
 		);
+		output.appendLine(`[webview] scriptUri: ${scriptUri}`);
+		output.appendLine(`[webview] cssUri: ${cssUri}`);
+		output.appendLine(`[webview] extensionUri: ${this.ctx.extensionUri}`);
+		const cacheBust = IS_DEV ? `?t=${Date.now()}` : '';
 		return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<link rel="stylesheet" href="${cssUri}">
+	<link rel="stylesheet" href="${cssUri}${cacheBust}">
 </head>
 <body>
-	<div id="root"></div>
+	<div id="root"><p style="padding:12px;color:var(--vscode-descriptionForeground);font-size:12px;">Loading v${EXT_VERSION}...</p></div>
+	<div id="diag" style="position:fixed;bottom:0;right:0;padding:4px 8px;font-size:10px;color:var(--vscode-descriptionForeground);opacity:0.5;"></div>
 	<script>
 		const vscode = acquireVsCodeApi();
+		window.__EXT_VERSION__ = "${EXT_VERSION}";
+		document.getElementById('diag').textContent = 'v${EXT_VERSION} init ok';
 	</script>
-	<script src="${scriptUri}"></script>
+	<script src="${scriptUri}${cacheBust}" onerror="document.getElementById('root').innerHTML='<p style=\\'padding:12px;color:#f44;\\'>Failed to load webview.js</p>';"></script>
 </body>
 </html>`;
 	}
 }
 
-// ── WeChat webview provider (stub — engine disabled for now) ──
+// ── WeChat engine (lazy-loaded via separate bundle to avoid side-effects) ──
+
+let wechatEngine: any;
+let wechatPanel: vscode.WebviewView | undefined;
+let wechatState: 'idle' | 'logging_in' | 'connecting' | 'connected' | 'error' = 'idle';
+let wechatStatusBar: vscode.StatusBarItem | undefined;
+
+async function getOrCreateEngine(): Promise<any> {
+	if (wechatEngine) return wechatEngine;
+	output.appendLine('[wechat] lazy-loading engine...');
+	const enginePath = path.join(__dirname, 'wechat-engine.js');
+	const { ClawBotEngine } = require(enginePath);
+	wechatEngine = new ClawBotEngine();
+
+	wechatEngine.on('stateChange', (state, detail) => {
+		wechatState = state;
+		output.appendLine(`[wechat] state: ${state}${detail ? ' — ' + detail : ''}`);
+		updateWechatPanel();
+		updateWechatStatusBar();
+	});
+	wechatEngine.on('qrCode', (info) => {
+		output.appendLine(`[wechat] QR code ready`);
+		updateWechatPanel(info.qrcodeUrl);
+	});
+	wechatEngine.on('qrScanned', () => {
+		output.appendLine('[wechat] QR scanned, waiting confirm...');
+	});
+	wechatEngine.on('loginSuccess', () => {
+		output.appendLine('[wechat] login success');
+		vscode.window.showInformationMessage('WeChat 登录成功');
+	});
+	wechatEngine.on('loginError', (err) => {
+		output.appendLine(`[wechat] login error: ${err.message}`);
+		vscode.window.showErrorMessage(`WeChat 登录失败: ${err.message}`);
+	});
+	wechatEngine.on('message', (from, text) => {
+		output.appendLine(`[wechat] msg from ${from}: ${text.substring(0, 80)}`);
+	});
+	wechatEngine.on('error', (err) => {
+		output.appendLine(`[wechat] error: ${err.message}`);
+	});
+
+	output.appendLine('[wechat] engine initialized');
+	return wechatEngine;
+}
+
+function updateWechatStatusBar() {
+	if (!wechatStatusBar) return;
+	const icons: Record<string, string> = {
+		idle: '$(circle-outline)',
+		logging_in: '$(loading~spin)',
+		connecting: '$(loading~spin)',
+		connected: '$(check)',
+		error: '$(error)',
+	};
+	wechatStatusBar.text = `${icons[wechatState] || ''} WeChat`;
+	wechatStatusBar.tooltip = `WeChat: ${wechatState}`;
+}
+
+function updateWechatPanel(qrUrl?: string) {
+	if (!wechatPanel) return;
+	wechatPanel.webview.postMessage({ type: 'stateChange', state: wechatState, qrUrl });
+}
 
 class WeChatViewProvider implements vscode.WebviewViewProvider {
-	resolveWebviewView(webviewView: vscode.WebviewView) {
-		webviewView.webview.options = { enableScripts: true };
-		webviewView.webview.html = `<!DOCTYPE html>
+	resolveWebviewView(view: vscode.WebviewView) {
+		wechatPanel = view;
+		view.webview.options = { enableScripts: true };
+		view.webview.html = this.getHtml();
+
+		view.webview.onDidReceiveMessage(async (msg) => {
+			try {
+				const engine = await getOrCreateEngine();
+				switch (msg.type) {
+					case 'login':
+						await engine.login();
+						break;
+					case 'connect':
+						await engine.connect();
+						break;
+					case 'disconnect':
+						engine.disconnect();
+						break;
+				}
+			} catch (err: any) {
+				output.appendLine(`[wechat] command error: ${err.message}`);
+				vscode.window.showErrorMessage(`WeChat: ${err.message}`);
+			}
+		});
+
+		output.appendLine('[wechat] panel resolved');
+	}
+
+	private getHtml(): string {
+		return `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
-body { font-family: var(--vscode-font-family); color: var(--vscode-sideBar-foreground); background: var(--vscode-sideBar-background); padding: 16px; }
-p { font-size: 13px; color: var(--vscode-descriptionForeground); }
-</style></head><body>
-<p>WeChat integration loading...</p>
-<p style="font-size:12px;margin-top:8px;">Engine will be enabled in next iteration.</p>
+:root { --fg: var(--vscode-sideBar-foreground); --bg: var(--vscode-sideBar-background); --muted: var(--vscode-descriptionForeground); --accent: var(--vscode-button-background); --accent-fg: var(--vscode-button-foreground); }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); padding: 12px; font-size: 13px; }
+.status { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; }
+.dot.idle { background: #888; }
+.dot.logging_in, .dot.connecting { background: #f0a030; animation: pulse 1s infinite; }
+.dot.connected { background: #4caf50; }
+.dot.error { background: #f44336; }
+@keyframes pulse { 50% { opacity: 0.4; } }
+.label { font-size: 12px; color: var(--muted); }
+.btn { display: block; width: 100%; padding: 6px 12px; margin-top: 8px; border: none; border-radius: 4px; background: var(--accent); color: var(--accent-fg); cursor: pointer; font-size: 12px; }
+.btn:hover { opacity: 0.9; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.secondary { background: transparent; border: 1px solid var(--muted); color: var(--fg); }
+.qr-container { text-align: center; margin: 12px 0; }
+.qr-container img { max-width: 200px; border-radius: 4px; }
+.info { font-size: 11px; color: var(--muted); margin-top: 12px; }
+</style></head>
+<body>
+<div class="status">
+	<div id="dot" class="dot idle"></div>
+	<span id="state-text">未连接</span>
+</div>
+<div id="qr-container" class="qr-container" style="display:none;">
+	<img id="qr-img" alt="QR Code" />
+	<p class="label">请用微信扫码登录</p>
+</div>
+<button id="btn-login" class="btn" onclick="postMsg('login')">扫码登录</button>
+<button id="btn-connect" class="btn" style="display:none;" onclick="postMsg('connect')">连接</button>
+<button id="btn-disconnect" class="btn secondary" style="display:none;" onclick="postMsg('disconnect')">断开连接</button>
+<p class="info">连接后微信消息将自动路由到 MultiSession。</p>
+<script>
+const vscode = acquireVsCodeApi();
+function postMsg(type) { vscode.postMessage({ type }); }
+const stateLabels = { idle: '未连接', logging_in: '扫码登录中...', connecting: '连接中...', connected: '已连接', error: '连接错误' };
+window.addEventListener('message', e => {
+	const msg = e.data;
+	if (msg.type === 'stateChange') {
+		const s = msg.state;
+		document.getElementById('dot').className = 'dot ' + s;
+		document.getElementById('state-text').textContent = stateLabels[s] || s;
+		document.getElementById('btn-login').style.display = (s === 'idle' || s === 'error') ? 'block' : 'none';
+		document.getElementById('btn-connect').style.display = (s === 'idle' && !msg.qrUrl) ? 'none' : (s === 'logging_in' ? 'none' : (s === 'connected' ? 'none' : 'block'));
+		document.getElementById('btn-disconnect').style.display = s === 'connected' ? 'block' : 'none';
+		if (msg.qrUrl) {
+			document.getElementById('qr-container').style.display = 'block';
+			document.getElementById('qr-img').src = msg.qrUrl;
+		} else if (s !== 'logging_in') {
+			document.getElementById('qr-container').style.display = 'none';
+		}
+	}
+});
+</script>
 </body></html>`;
 	}
 }
@@ -661,7 +829,20 @@ p { font-size: 13px; color: var(--vscode-descriptionForeground); }
 export function activate(ctx: vscode.ExtensionContext) {
 	output = vscode.window.createOutputChannel('MultiSession');
 	ctx.subscriptions.push(output);
-	output.appendLine('[activate] starting');
+
+	// read version from package.json at extension root
+	try {
+		const pkgPath = path.join(ctx.extensionPath, 'package.json');
+		const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+		EXT_VERSION = pkg.version || '?';
+	} catch { /* fallback */ }
+
+	IS_DEV = ctx.extensionMode === vscode.ExtensionMode.Development;
+	const modeLabel = IS_DEV ? 'DEV' : 'PROD';
+
+	output.appendLine(`[activate] MultiSession v${EXT_VERSION} (${modeLabel})`);
+	output.appendLine(`[activate] extensionPath: ${ctx.extensionPath}`);
+	output.appendLine(`[activate] dataRoot: ${DATA_ROOT}`);
 
 	ensureDir(DATA_ROOT);
 	ensureDir(SESSIONS_DIR);
@@ -670,18 +851,29 @@ export function activate(ctx: vscode.ExtensionContext) {
 	markThisWindowActive();
 
 	// register MultiSession webview
+	const msProvider = new MultiSessionViewProvider(ctx);
 	ctx.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(
 			'multiSession.panel',
-			new MultiSessionViewProvider(ctx),
+			msProvider,
 			{ webviewOptions: { retainContextWhenHidden: true } }
 		)
 	);
+	output.appendLine('[activate] MultiSession panel provider registered');
 
-	// ── WeChat stub panel (engine disabled for debugging) ──
+	// ── WeChat panel ──
 	ctx.subscriptions.push(
 		vscode.window.registerWebviewViewProvider('multiSession.wechat', new WeChatViewProvider())
 	);
+	output.appendLine('[activate] WeChat panel provider registered');
+
+	// ── WeChat status bar ──
+	wechatStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
+	wechatStatusBar.command = 'multiSession.wechatStatus';
+	wechatStatusBar.text = '$(circle-outline) WeChat';
+	wechatStatusBar.tooltip = 'WeChat: idle';
+	wechatStatusBar.show();
+	ctx.subscriptions.push(wechatStatusBar);
 
 	// ── commands ──
 	ctx.subscriptions.push(
@@ -716,13 +908,41 @@ export function activate(ctx: vscode.ExtensionContext) {
 			vscode.env.clipboard.writeText(RULE_PROMPT);
 			vscode.window.showInformationMessage('通信规则已复制到剪贴板');
 		}),
-		vscode.commands.registerCommand('multiSession.wechatLogin', () => {
-			vscode.window.showInformationMessage('WeChat engine not yet enabled');
+		vscode.commands.registerCommand('multiSession.wechatLogin', async () => {
+			try {
+				const engine = await getOrCreateEngine();
+				await engine.login();
+			} catch (err: any) {
+				vscode.window.showErrorMessage(`WeChat 登录失败: ${err.message}`);
+			}
 		}),
-		vscode.commands.registerCommand('multiSession.wechatConnect', () => {}),
-		vscode.commands.registerCommand('multiSession.wechatDisconnect', () => {}),
-		vscode.commands.registerCommand('multiSession.wechatStatus', () => {}),
-		vscode.commands.registerCommand('multiSession.wechatScreenshot', () => {}),
+		vscode.commands.registerCommand('multiSession.wechatConnect', async () => {
+			try {
+				const engine = await getOrCreateEngine();
+				await engine.connect();
+			} catch (err: any) {
+				vscode.window.showErrorMessage(`WeChat 连接失败: ${err.message}`);
+			}
+		}),
+		vscode.commands.registerCommand('multiSession.wechatDisconnect', () => {
+			wechatEngine?.disconnect();
+		}),
+		vscode.commands.registerCommand('multiSession.wechatStatus', () => {
+			const state = wechatEngine?.getState() || 'idle';
+			vscode.window.showInformationMessage(`WeChat 状态: ${state}`);
+		}),
+		vscode.commands.registerCommand('multiSession.wechatScreenshot', async () => {
+			if (!wechatEngine || wechatEngine.getState() !== 'connected') {
+				vscode.window.showWarningMessage('WeChat 未连接');
+				return;
+			}
+			try {
+				const filePath = await wechatEngine.sendScreenshot();
+				vscode.window.showInformationMessage(`截图已发送: ${filePath}`);
+			} catch (err: any) {
+				vscode.window.showErrorMessage(`截图失败: ${err.message}`);
+			}
+		}),
 	);
 
 	// window focus tracking
@@ -744,13 +964,17 @@ export function activate(ctx: vscode.ExtensionContext) {
 	// start polling
 	pollTimer = setInterval(tick, POLL_INTERVAL_MS);
 	output.appendLine('[activate] polling started');
-
+	output.appendLine(`[activate] done — v${EXT_VERSION} ready`);
 }
 
 export function deactivate() {
 	if (pollTimer) {
 		clearInterval(pollTimer);
 		pollTimer = undefined;
+	}
+	if (wechatEngine) {
+		try { wechatEngine.disconnect(); } catch { /* best effort */ }
+		wechatEngine = undefined;
 	}
 	output?.appendLine('[deactivate] cleanup done');
 }

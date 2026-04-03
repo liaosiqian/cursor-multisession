@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MultiSession Webview Test</title>
+<style>
+:root {
+  --vscode-font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  --vscode-sideBar-foreground: #ccc;
+  --vscode-sideBar-background: #1e1e1e;
+  --vscode-descriptionForeground: #888;
+  --vscode-button-background: #0e639c;
+  --vscode-button-foreground: #fff;
+  --vscode-input-background: #3c3c3c;
+  --vscode-input-foreground: #ccc;
+  --vscode-input-border: #555;
+}
+body { margin: 0; background: #1e1e1e; }
+#root { width: 360px; margin: 20px auto; }
+</style>
+</head>
+<body>
+<div id="root"><p style="color:#888;padding:12px;">Loading...</p></div>
+<link rel="stylesheet" href="dist/webview.css" />
+<script>
+const vscode = {
+  postMessage: (msg) => console.log('[vscode.postMessage]', JSON.stringify(msg)),
+  setState: (s) => console.log('[vscode.setState]', JSON.stringify(s)),
+  getState: () => null,
+};
+window.acquireVsCodeApi = () => vscode;
+window.__EXT_VERSION__ = 'test';
+</script>
+<script src="dist/webview.js" onerror="document.getElementById('root').innerHTML='<p style=\'color:red;padding:12px;\'>Failed to load webview.js</p>';"></script>
+</body>
+</html>
