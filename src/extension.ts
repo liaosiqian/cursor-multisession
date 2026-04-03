@@ -658,11 +658,9 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
 	<div id="root"><p style="padding:12px;color:var(--vscode-descriptionForeground);font-size:12px;">Loading v${EXT_VERSION}...</p></div>
-	<div id="diag" style="position:fixed;bottom:0;right:0;padding:4px 8px;font-size:10px;color:var(--vscode-descriptionForeground);opacity:0.5;"></div>
 	<script>
 		const vscode = acquireVsCodeApi();
 		window.__EXT_VERSION__ = "${EXT_VERSION}";
-		document.getElementById('diag').textContent = 'v${EXT_VERSION} init ok';
 	</script>
 	<script src="${scriptUri}${cacheBust}" onerror="document.getElementById('root').innerHTML='<p style=\\'padding:12px;color:#f44;\\'>Failed to load webview.js</p>';"></script>
 </body>
@@ -670,68 +668,160 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 	}
 }
 
-// ── WeChat engine (lazy-loaded via separate bundle to avoid side-effects) ──
+// ── QR code image helper ──
 
-let wechatEngine: any;
+async function generateQRDataUrl(text: string): Promise<string> {
+	if (!text) return '';
+	if (text.startsWith('data:')) return text;
+	try {
+		const QRCode = require('qrcode');
+		return await QRCode.toDataURL(text, { width: 256, margin: 2 }) as string;
+	} catch (err: any) {
+		output.appendLine(`[wechat] QR generation failed: ${err.message}`);
+		return '';
+	}
+}
+
+// ── WeChat multi-account manager ──
+
+const ACCOUNTS_FILE = path.join(os.homedir(), '.clawbot', 'accounts.json');
+
+interface WeChatAccount {
+	id: string;
+	name: string;
+	isPrimary: boolean;
+	bindingSessions: string[];
+}
+
+interface AccountEntry {
+	account: WeChatAccount;
+	engine: any;
+	state: 'idle' | 'logging_in' | 'connecting' | 'connected' | 'error';
+	qrDataUrl?: string;
+	lastActivityTs: number;
+}
+
+const accounts = new Map<string, AccountEntry>();
 let wechatPanel: vscode.WebviewView | undefined;
-let wechatState: 'idle' | 'logging_in' | 'connecting' | 'connected' | 'error' = 'idle';
 let wechatStatusBar: vscode.StatusBarItem | undefined;
+let loginPendingAccountId: string | undefined;
 
-async function getOrCreateEngine(): Promise<any> {
-	if (wechatEngine) return wechatEngine;
-	output.appendLine('[wechat] lazy-loading engine...');
-	const enginePath = path.join(__dirname, 'wechat-engine.js');
-	const { ClawBotEngine } = require(enginePath);
-	wechatEngine = new ClawBotEngine();
+function loadAccounts(): WeChatAccount[] {
+	try {
+		if (!fs.existsSync(ACCOUNTS_FILE)) return [];
+		return JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf-8'));
+	} catch { return []; }
+}
 
-	wechatEngine.on('stateChange', (state, detail) => {
-		wechatState = state;
-		output.appendLine(`[wechat] state: ${state}${detail ? ' — ' + detail : ''}`);
-		updateWechatPanel();
+function saveAccounts(): void {
+	const list = [...accounts.values()].map(e => e.account);
+	const dir = path.dirname(ACCOUNTS_FILE);
+	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(list, null, 2));
+}
+
+function requireEngineModule(): any {
+	return require(path.join(__dirname, 'wechat-engine.js'));
+}
+
+const ACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+
+function isAccountActive(entry: AccountEntry): boolean {
+	return entry.lastActivityTs > 0 && (Date.now() - entry.lastActivityTs) < ACTIVITY_TIMEOUT_MS;
+}
+
+function createEngine(accountId: string): any {
+	const { ClawBotEngine } = requireEngineModule();
+	const engine = new ClawBotEngine();
+	const entry = accounts.get(accountId)!;
+
+	engine.on('stateChange', (state: string, detail?: string) => {
+		entry.state = state as any;
+		output.appendLine(`[wechat:${entry.account.name}] state: ${state}${detail ? ' — ' + detail : ''}`);
+		pushFullState();
 		updateWechatStatusBar();
 	});
-	wechatEngine.on('qrCode', (info) => {
-		output.appendLine(`[wechat] QR code ready`);
-		updateWechatPanel(info.qrcodeUrl);
-	});
-	wechatEngine.on('qrScanned', () => {
-		output.appendLine('[wechat] QR scanned, waiting confirm...');
-	});
-	wechatEngine.on('loginSuccess', () => {
-		output.appendLine('[wechat] login success');
-		vscode.window.showInformationMessage('WeChat 登录成功');
-	});
-	wechatEngine.on('loginError', (err) => {
-		output.appendLine(`[wechat] login error: ${err.message}`);
-		vscode.window.showErrorMessage(`WeChat 登录失败: ${err.message}`);
-	});
-	wechatEngine.on('message', (from, text) => {
-		output.appendLine(`[wechat] msg from ${from}: ${text.substring(0, 80)}`);
-	});
-	wechatEngine.on('error', (err) => {
-		output.appendLine(`[wechat] error: ${err.message}`);
+
+	engine.on('qrCode', async (info: any) => {
+		output.appendLine(`[wechat:${entry.account.name}] QR ready`);
+		entry.qrDataUrl = await generateQRDataUrl(info.qrcodeUrl);
+		pushFullState();
 	});
 
-	output.appendLine('[wechat] engine initialized');
-	return wechatEngine;
+	engine.on('qrScanned', () => {
+		output.appendLine(`[wechat:${entry.account.name}] QR scanned`);
+	});
+
+	engine.on('loginSuccess', async () => {
+		output.appendLine(`[wechat:${entry.account.name}] login success, auto-connecting...`);
+		entry.qrDataUrl = undefined;
+		loginPendingAccountId = undefined;
+		vscode.window.showInformationMessage(`WeChat [${entry.account.name}] 登录成功`);
+		try { await engine.connect(); } catch (err: any) {
+			output.appendLine(`[wechat:${entry.account.name}] auto-connect failed: ${err.message}`);
+		}
+	});
+
+	engine.on('loginError', (err: Error) => {
+		output.appendLine(`[wechat:${entry.account.name}] login error: ${err.message}`);
+		loginPendingAccountId = undefined;
+	});
+
+	engine.on('message', (from: string, text: string) => {
+		entry.lastActivityTs = Date.now();
+		output.appendLine(`[wechat:${entry.account.name}] msg from ${from}: ${text.substring(0, 60)}`);
+		pushFullState();
+	});
+
+	engine.on('error', (err: Error) => {
+		output.appendLine(`[wechat:${entry.account.name}] error: ${err.message}`);
+	});
+
+	return engine;
+}
+
+function pushFullState() {
+	if (!wechatPanel) return;
+	const list = [...accounts.values()].map(e => ({
+		id: e.account.id,
+		name: e.account.name,
+		isPrimary: e.account.isPrimary,
+		state: e.state,
+		qrDataUrl: e.qrDataUrl,
+		active: isAccountActive(e),
+		bindingSessions: e.account.bindingSessions,
+	}));
+	wechatPanel.webview.postMessage({ type: 'fullState', accounts: list, loginPendingAccountId });
 }
 
 function updateWechatStatusBar() {
 	if (!wechatStatusBar) return;
-	const icons: Record<string, string> = {
-		idle: '$(circle-outline)',
-		logging_in: '$(loading~spin)',
-		connecting: '$(loading~spin)',
-		connected: '$(check)',
-		error: '$(error)',
-	};
-	wechatStatusBar.text = `${icons[wechatState] || ''} WeChat`;
-	wechatStatusBar.tooltip = `WeChat: ${wechatState}`;
+	const connected = [...accounts.values()].filter(e => e.state === 'connected').length;
+	const total = accounts.size;
+	if (total === 0) {
+		wechatStatusBar.text = '$(circle-outline) WeChat';
+		wechatStatusBar.tooltip = 'WeChat: 未配置';
+	} else if (connected === total) {
+		wechatStatusBar.text = `$(check) WeChat (${connected})`;
+		wechatStatusBar.tooltip = `WeChat: 全部已连接 (${connected}/${total})`;
+	} else {
+		wechatStatusBar.text = `$(circle-filled) WeChat (${connected}/${total})`;
+		wechatStatusBar.tooltip = `WeChat: ${connected}/${total} 已连接`;
+	}
 }
 
-function updateWechatPanel(qrUrl?: string) {
-	if (!wechatPanel) return;
-	wechatPanel.webview.postMessage({ type: 'stateChange', state: wechatState, qrUrl });
+function restoreSavedAccounts() {
+	const saved = loadAccounts();
+	for (const acct of saved) {
+		const entry: AccountEntry = {
+			account: acct,
+			engine: null,
+			state: 'idle',
+			lastActivityTs: 0,
+		};
+		accounts.set(acct.id, entry);
+	}
+	output.appendLine(`[wechat] restored ${saved.length} saved accounts`);
 }
 
 class WeChatViewProvider implements vscode.WebviewViewProvider {
@@ -742,16 +832,91 @@ class WeChatViewProvider implements vscode.WebviewViewProvider {
 
 		view.webview.onDidReceiveMessage(async (msg) => {
 			try {
-				const engine = await getOrCreateEngine();
 				switch (msg.type) {
-					case 'login':
-						await engine.login();
+					case 'addAccount': {
+						const id = `wx_${Date.now().toString(36)}`;
+						const name = msg.name || `微信 ${accounts.size + 1}`;
+						const isPrimary = accounts.size === 0;
+						const acct: WeChatAccount = { id, name, isPrimary, bindingSessions: [] };
+						const entry: AccountEntry = { account: acct, engine: null, state: 'idle', lastActivityTs: 0 };
+						accounts.set(id, entry);
+						saveAccounts();
+						output.appendLine(`[wechat] account added: ${name} (${id})`);
+						pushFullState();
 						break;
-					case 'connect':
-						await engine.connect();
+					}
+					case 'removeAccount': {
+						const entry = accounts.get(msg.accountId);
+						if (entry) {
+							if (entry.engine) { try { entry.engine.disconnect(); entry.engine.logout(); } catch {} }
+							accounts.delete(msg.accountId);
+							saveAccounts();
+							output.appendLine(`[wechat] account removed: ${entry.account.name}`);
+							pushFullState();
+							updateWechatStatusBar();
+						}
 						break;
-					case 'disconnect':
-						engine.disconnect();
+					}
+					case 'renameAccount': {
+						const entry = accounts.get(msg.accountId);
+						if (entry) {
+							entry.account.name = msg.name;
+							saveAccounts();
+							pushFullState();
+						}
+						break;
+					}
+					case 'setPrimary': {
+						for (const e of accounts.values()) e.account.isPrimary = false;
+						const entry = accounts.get(msg.accountId);
+						if (entry) entry.account.isPrimary = true;
+						saveAccounts();
+						pushFullState();
+						break;
+					}
+					case 'login': {
+						const entry = accounts.get(msg.accountId);
+						if (!entry) break;
+						if (!entry.engine) {
+							entry.engine = createEngine(msg.accountId);
+						}
+						loginPendingAccountId = msg.accountId;
+						pushFullState();
+						await entry.engine.login();
+						break;
+					}
+					case 'connect': {
+						const entry = accounts.get(msg.accountId);
+						if (!entry?.engine) break;
+						await entry.engine.connect();
+						break;
+					}
+					case 'disconnect': {
+						const entry = accounts.get(msg.accountId);
+						if (!entry?.engine) break;
+						entry.engine.disconnect();
+						break;
+					}
+					case 'bindSession': {
+						const entry = accounts.get(msg.accountId);
+						if (!entry) break;
+						if (!entry.account.bindingSessions.includes(msg.sessionId)) {
+							entry.account.bindingSessions.push(msg.sessionId);
+							saveAccounts();
+							pushFullState();
+						}
+						break;
+					}
+					case 'unbindSession': {
+						const entry = accounts.get(msg.accountId);
+						if (!entry) break;
+						entry.account.bindingSessions = entry.account.bindingSessions.filter((s: string) => s !== msg.sessionId);
+						saveAccounts();
+						pushFullState();
+						break;
+					}
+					case 'requestState':
+						pushFullState();
 						break;
 				}
 			} catch (err: any) {
@@ -760,65 +925,106 @@ class WeChatViewProvider implements vscode.WebviewViewProvider {
 			}
 		});
 
+		view.onDidChangeVisibility(() => { if (view.visible) pushFullState(); });
+		setTimeout(() => pushFullState(), 100);
 		output.appendLine('[wechat] panel resolved');
 	}
 
 	private getHtml(): string {
 		return `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
-:root { --fg: var(--vscode-sideBar-foreground); --bg: var(--vscode-sideBar-background); --muted: var(--vscode-descriptionForeground); --accent: var(--vscode-button-background); --accent-fg: var(--vscode-button-foreground); }
+:root { --fg: var(--vscode-sideBar-foreground); --bg: var(--vscode-sideBar-background); --muted: var(--vscode-descriptionForeground); --accent: var(--vscode-button-background); --accent-fg: var(--vscode-button-foreground); --border: var(--vscode-panel-border, #444); }
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); padding: 12px; font-size: 13px; }
-.status { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; }
-.dot.idle { background: #888; }
-.dot.logging_in, .dot.connecting { background: #f0a030; animation: pulse 1s infinite; }
-.dot.connected { background: #4caf50; }
-.dot.error { background: #f44336; }
+body { font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); padding: 8px; font-size: 13px; }
+.section-title { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.account-card { border: 1px solid var(--border); border-radius: 4px; padding: 8px; margin-bottom: 8px; }
+.account-card.primary { border-left: 3px solid #4caf50; }
+.account-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.dot.idle { background: #888; } .dot.logging_in, .dot.connecting { background: #f0a030; animation: pulse 1s infinite; }
+.dot.connected { background: #4caf50; } .dot.error { background: #f44; }
 @keyframes pulse { 50% { opacity: 0.4; } }
-.label { font-size: 12px; color: var(--muted); }
-.btn { display: block; width: 100%; padding: 6px 12px; margin-top: 8px; border: none; border-radius: 4px; background: var(--accent); color: var(--accent-fg); cursor: pointer; font-size: 12px; }
-.btn:hover { opacity: 0.9; }
-.btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn.secondary { background: transparent; border: 1px solid var(--muted); color: var(--fg); }
-.qr-container { text-align: center; margin: 12px 0; }
-.qr-container img { max-width: 200px; border-radius: 4px; }
-.info { font-size: 11px; color: var(--muted); margin-top: 12px; }
+.account-name { font-weight: 600; font-size: 12px; flex: 1; }
+.account-name.editable { cursor: pointer; }
+.badge { font-size: 10px; padding: 1px 4px; border-radius: 3px; background: #4caf50; color: #fff; }
+.badge.active { background: #2196f3; }
+.account-actions { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.btn { padding: 4px 8px; border: none; border-radius: 3px; background: var(--accent); color: var(--accent-fg); cursor: pointer; font-size: 11px; }
+.btn:hover { opacity: 0.85; }
+.btn.sm { font-size: 10px; padding: 2px 6px; }
+.btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--fg); }
+.btn.danger { background: transparent; border: 1px solid #f44; color: #f44; }
+.qr-box { text-align: center; margin: 8px 0; }
+.qr-box img { max-width: 180px; border-radius: 4px; }
+.qr-box p { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.add-section { margin-top: 8px; }
+.add-row { display: flex; gap: 4px; }
+.add-row input { flex: 1; padding: 4px 6px; border: 1px solid var(--border); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); font-size: 11px; }
+.info { font-size: 10px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
+.state-label { font-size: 11px; color: var(--muted); }
 </style></head>
 <body>
-<div class="status">
-	<div id="dot" class="dot idle"></div>
-	<span id="state-text">未连接</span>
+<div class="section-title">微信账号</div>
+<div id="account-list"></div>
+<div class="add-section">
+	<div class="add-row">
+		<input id="new-name" placeholder="账号名称（如：工作微信）" />
+		<button class="btn sm" onclick="addAccount()">+ 添加</button>
+	</div>
 </div>
-<div id="qr-container" class="qr-container" style="display:none;">
-	<img id="qr-img" alt="QR Code" />
-	<p class="label">请用微信扫码登录</p>
-</div>
-<button id="btn-login" class="btn" onclick="postMsg('login')">扫码登录</button>
-<button id="btn-connect" class="btn" style="display:none;" onclick="postMsg('connect')">连接</button>
-<button id="btn-disconnect" class="btn secondary" style="display:none;" onclick="postMsg('disconnect')">断开连接</button>
-<p class="info">连接后微信消息将自动路由到 MultiSession。</p>
+<p class="info">
+	• 标记为"主渠道"的账号默认接收所有未绑定 session 的消息<br>
+	• 微信 30 分钟内无消息则暂停推送 AI 回复<br>
+	• 每个 session 可绑定到指定微信账号
+</p>
 <script>
 const vscode = acquireVsCodeApi();
-function postMsg(type) { vscode.postMessage({ type }); }
-const stateLabels = { idle: '未连接', logging_in: '扫码登录中...', connecting: '连接中...', connected: '已连接', error: '连接错误' };
+const stateLabels = { idle: '未连接', logging_in: '登录中...', connecting: '连接中...', connected: '已连接', error: '错误' };
+let currentAccounts = [];
+
+function post(type, data) { vscode.postMessage({ type, ...data }); }
+function addAccount() {
+	const inp = document.getElementById('new-name');
+	post('addAccount', { name: inp.value.trim() });
+	inp.value = '';
+}
+
+function renderAccounts(list, loginPendingId) {
+	currentAccounts = list;
+	const container = document.getElementById('account-list');
+	if (!list.length) { container.innerHTML = '<p style="color:var(--muted);font-size:12px;padding:8px 0;">尚未添加微信账号</p>'; return; }
+	container.innerHTML = list.map(a => {
+		const stateText = stateLabels[a.state] || a.state;
+		const showQr = a.qrDataUrl && a.state === 'logging_in';
+		const showLogin = a.state === 'idle' || a.state === 'error';
+		const showDisconnect = a.state === 'connected';
+		return '<div class="account-card' + (a.isPrimary ? ' primary' : '') + '">' +
+			'<div class="account-header">' +
+				'<div class="dot ' + a.state + '"></div>' +
+				'<span class="account-name">' + esc(a.name) + '</span>' +
+				(a.isPrimary ? '<span class="badge">主渠道</span>' : '') +
+				(a.active ? '<span class="badge active">活跃</span>' : '') +
+			'</div>' +
+			'<div class="state-label">' + stateText + '</div>' +
+			(showQr ? '<div class="qr-box"><img src="' + a.qrDataUrl + '" /><p>请用微信扫码</p></div>' : '') +
+			'<div class="account-actions">' +
+				(showLogin ? '<button class="btn sm" onclick="post(\'login\',{accountId:\'' + a.id + '\'})">扫码登录</button>' : '') +
+				(showDisconnect ? '<button class="btn sm secondary" onclick="post(\'disconnect\',{accountId:\'' + a.id + '\'})">断开</button>' : '') +
+				(!a.isPrimary && a.state !== 'logging_in' ? '<button class="btn sm secondary" onclick="post(\'setPrimary\',{accountId:\'' + a.id + '\'})">设为主渠道</button>' : '') +
+				(a.state === 'idle' ? '<button class="btn sm danger" onclick="if(confirm(\'确定删除?\'))post(\'removeAccount\',{accountId:\'' + a.id + '\'})">删除</button>' : '') +
+			'</div>' +
+		'</div>';
+	}).join('');
+}
+
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
 window.addEventListener('message', e => {
 	const msg = e.data;
-	if (msg.type === 'stateChange') {
-		const s = msg.state;
-		document.getElementById('dot').className = 'dot ' + s;
-		document.getElementById('state-text').textContent = stateLabels[s] || s;
-		document.getElementById('btn-login').style.display = (s === 'idle' || s === 'error') ? 'block' : 'none';
-		document.getElementById('btn-connect').style.display = (s === 'idle' && !msg.qrUrl) ? 'none' : (s === 'logging_in' ? 'none' : (s === 'connected' ? 'none' : 'block'));
-		document.getElementById('btn-disconnect').style.display = s === 'connected' ? 'block' : 'none';
-		if (msg.qrUrl) {
-			document.getElementById('qr-container').style.display = 'block';
-			document.getElementById('qr-img').src = msg.qrUrl;
-		} else if (s !== 'logging_in') {
-			document.getElementById('qr-container').style.display = 'none';
-		}
-	}
+	if (msg.type === 'fullState') renderAccounts(msg.accounts, msg.loginPendingAccountId);
 });
+
+post('requestState', {});
 </script>
 </body></html>`;
 	}
@@ -862,6 +1068,7 @@ export function activate(ctx: vscode.ExtensionContext) {
 	output.appendLine('[activate] MultiSession panel provider registered');
 
 	// ── WeChat panel ──
+	restoreSavedAccounts();
 	ctx.subscriptions.push(
 		vscode.window.registerWebviewViewProvider('multiSession.wechat', new WeChatViewProvider())
 	);
@@ -870,10 +1077,9 @@ export function activate(ctx: vscode.ExtensionContext) {
 	// ── WeChat status bar ──
 	wechatStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
 	wechatStatusBar.command = 'multiSession.wechatStatus';
-	wechatStatusBar.text = '$(circle-outline) WeChat';
-	wechatStatusBar.tooltip = 'WeChat: idle';
 	wechatStatusBar.show();
 	ctx.subscriptions.push(wechatStatusBar);
+	updateWechatStatusBar();
 
 	// ── commands ──
 	ctx.subscriptions.push(
@@ -908,36 +1114,35 @@ export function activate(ctx: vscode.ExtensionContext) {
 			vscode.env.clipboard.writeText(RULE_PROMPT);
 			vscode.window.showInformationMessage('通信规则已复制到剪贴板');
 		}),
-		vscode.commands.registerCommand('multiSession.wechatLogin', async () => {
-			try {
-				const engine = await getOrCreateEngine();
-				await engine.login();
-			} catch (err: any) {
-				vscode.window.showErrorMessage(`WeChat 登录失败: ${err.message}`);
-			}
+		vscode.commands.registerCommand('multiSession.wechatLogin', () => {
+			vscode.window.showInformationMessage('请在 WeChat 面板中添加账号并扫码登录');
 		}),
-		vscode.commands.registerCommand('multiSession.wechatConnect', async () => {
-			try {
-				const engine = await getOrCreateEngine();
-				await engine.connect();
-			} catch (err: any) {
-				vscode.window.showErrorMessage(`WeChat 连接失败: ${err.message}`);
+		vscode.commands.registerCommand('multiSession.wechatConnect', () => {
+			for (const e of accounts.values()) {
+				if (e.engine && e.state === 'idle' && e.engine.hasCredentials()) {
+					e.engine.connect().catch(() => {});
+				}
 			}
 		}),
 		vscode.commands.registerCommand('multiSession.wechatDisconnect', () => {
-			wechatEngine?.disconnect();
+			for (const e of accounts.values()) {
+				if (e.engine && e.state === 'connected') e.engine.disconnect();
+			}
 		}),
 		vscode.commands.registerCommand('multiSession.wechatStatus', () => {
-			const state = wechatEngine?.getState() || 'idle';
-			vscode.window.showInformationMessage(`WeChat 状态: ${state}`);
+			const lines = [...accounts.values()].map(e =>
+				`${e.account.name}: ${e.state}${e.account.isPrimary ? ' (主渠道)' : ''}${isAccountActive(e) ? ' [活跃]' : ''}`
+			);
+			vscode.window.showInformationMessage(lines.length ? lines.join('\n') : '未添加微信账号');
 		}),
 		vscode.commands.registerCommand('multiSession.wechatScreenshot', async () => {
-			if (!wechatEngine || wechatEngine.getState() !== 'connected') {
-				vscode.window.showWarningMessage('WeChat 未连接');
+			const connected = [...accounts.values()].find(e => e.state === 'connected' && e.account.isPrimary);
+			if (!connected?.engine) {
+				vscode.window.showWarningMessage('无已连接的主渠道微信');
 				return;
 			}
 			try {
-				const filePath = await wechatEngine.sendScreenshot();
+				const filePath = await connected.engine.sendScreenshot();
 				vscode.window.showInformationMessage(`截图已发送: ${filePath}`);
 			} catch (err: any) {
 				vscode.window.showErrorMessage(`截图失败: ${err.message}`);
@@ -972,9 +1177,11 @@ export function deactivate() {
 		clearInterval(pollTimer);
 		pollTimer = undefined;
 	}
-	if (wechatEngine) {
-		try { wechatEngine.disconnect(); } catch { /* best effort */ }
-		wechatEngine = undefined;
+	for (const entry of accounts.values()) {
+		if (entry.engine) {
+			try { entry.engine.disconnect(); } catch {}
+		}
 	}
+	accounts.clear();
 	output?.appendLine('[deactivate] cleanup done');
 }
