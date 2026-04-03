@@ -88,6 +88,9 @@ function App() {
 	const [inquirySelections, setInquirySelections] = useState<Record<string, string[]>>({});
 	const [inquiryTexts, setInquiryTexts] = useState<Record<string, string>>({});
 	const [extVersion, setExtVersion] = useState<string>((window as any).__EXT_VERSION__ || '?');
+	const [acItems, setAcItems] = useState<{ id: string; label: string; desc?: string }[]>([]);
+	const [acMode, setAcMode] = useState<'skill' | 'history' | null>(null);
+	const [acIndex, setAcIndex] = useState(0);
 
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const messageLogRef = useRef<HTMLDivElement>(null);
@@ -180,6 +183,24 @@ function App() {
 					return { ...prev, [msg.sessionId]: logs };
 				});
 				break;
+			case 'skillContent':
+				setInputText(prev => {
+					const prefix = prev ? prev + '\n' : '';
+					return prefix + `[skill: ${msg.skillName}]\n${msg.content}`;
+				});
+				setAcMode(null);
+				setAcItems([]);
+				break;
+			case 'skillList':
+				setAcItems((msg.skills || []).map((s: any) => ({ id: s.name, label: s.name, desc: s.desc })));
+				setAcMode('skill');
+				setAcIndex(0);
+				break;
+			case 'historyList':
+				setAcItems((msg.items || []).map((h: any) => ({ id: h.id, label: h.label || h.name || h.id, desc: h.desc || '' })));
+				setAcMode('history');
+				setAcIndex(0);
+				break;
 			case 'extensionInfo':
 				if (msg.version) setExtVersion(msg.version);
 				break;
@@ -242,7 +263,73 @@ function App() {
 		e.target.value = '';
 	}, [addImageFromFile]);
 
+	const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+		const val = e.target.value;
+		setInputText(val);
+		if (val === '/') {
+			vscode.postMessage({ type: 'requestSkills' });
+		} else if (val === '@') {
+			vscode.postMessage({ type: 'requestHistory' });
+		} else if (!val.startsWith('/') && !val.startsWith('@')) {
+			setAcMode(null);
+			setAcItems([]);
+		}
+		setAcIndex(0);
+	}, []);
+
+	const filteredAcItems = useMemo(() => {
+		if (!acMode || acItems.length === 0) return [];
+		if (acMode === 'skill' && inputText.startsWith('/')) {
+			const q = inputText.slice(1).toLowerCase();
+			if (!q) return acItems;
+			return acItems.filter(i => i.label.toLowerCase().includes(q));
+		}
+		if (acMode === 'history' && inputText.startsWith('@')) {
+			const q = inputText.slice(1).toLowerCase();
+			if (!q) return acItems;
+			return acItems.filter(i => i.label.toLowerCase().includes(q) || (i.desc || '').toLowerCase().includes(q));
+		}
+		return acItems;
+	}, [acMode, acItems, inputText]);
+
+	const selectAcItem = useCallback((item: { id: string; label: string }) => {
+		if (acMode === 'skill') {
+			setSharedFiles(prev => [...prev, { path: `@skill:${item.label}`, name: `skill: ${item.label}` }]);
+			setInputText('');
+			setTimeout(() => textareaRef.current?.focus(), 50);
+		} else if (acMode === 'history') {
+			setSharedFiles(prev => [...prev, { path: `@history:${item.id}`, name: `chat: ${item.label}` }]);
+			setInputText('');
+			setTimeout(() => textareaRef.current?.focus(), 50);
+		}
+		setAcMode(null);
+		setAcItems([]);
+	}, [acMode]);
+
 	const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+		if (acMode && filteredAcItems.length > 0) {
+			if (e.key === 'ArrowDown') {
+				e.preventDefault();
+				setAcIndex(prev => Math.min(prev + 1, filteredAcItems.length - 1));
+				return;
+			}
+			if (e.key === 'ArrowUp') {
+				e.preventDefault();
+				setAcIndex(prev => Math.max(prev - 1, 0));
+				return;
+			}
+			if (e.key === 'Enter' || e.key === 'Tab') {
+				e.preventDefault();
+				selectAcItem(filteredAcItems[acIndex]);
+				return;
+			}
+			if (e.key === 'Escape') {
+				e.preventDefault();
+				setAcMode(null);
+				setAcItems([]);
+				return;
+			}
+		}
 		if (e.key === 'Enter') {
 			if (e.shiftKey || e.ctrlKey || e.metaKey) {
 				return;
@@ -251,7 +338,7 @@ function App() {
 			e.stopPropagation();
 			handleSend();
 		}
-	}, [handleSend]);
+	}, [handleSend, acMode, filteredAcItems, acIndex, selectAcItem]);
 
 	const handleReconnect = useCallback(() => {
 		vscode.postMessage({ type: 'reconnect' });
@@ -637,23 +724,57 @@ function App() {
 					style={{ display: 'none' }}
 					onChange={handleImagePick}
 				/>
-				<button
-					className="btn-image"
-					onClick={() => fileInputRef.current?.click()}
-					title="添加图片"
-				>
-					🖼
-				</button>
-				<textarea
-					ref={textareaRef}
-					className="input-textarea"
-					value={inputText}
-					onChange={e => setInputText(e.target.value)}
-					onKeyDown={handleKeyDown}
-					onPaste={handlePaste}
-					placeholder="输入消息... (Enter 发送, Shift+Enter 换行, 可粘贴图片)"
-					rows={2}
-				/>
+				<div className="input-toolbar">
+					<button
+						className="btn-toolbar"
+						onClick={() => fileInputRef.current?.click()}
+						title="添加图片"
+					>
+						🖼
+					</button>
+					<button
+						className="btn-toolbar"
+						onClick={() => vscode.postMessage({ type: 'pickFile' })}
+						title="附加文件 (@file)"
+					>
+						📎
+					</button>
+					<button
+						className="btn-toolbar"
+						onClick={() => vscode.postMessage({ type: 'pickFolder' })}
+						title="附加文件夹"
+					>
+						📁
+					</button>
+				</div>
+				<div className="input-wrapper">
+					{acMode && filteredAcItems.length > 0 && (
+						<div className="ac-popup">
+							<div className="ac-title">{acMode === 'skill' ? 'Skills' : 'History'}</div>
+							{filteredAcItems.map((item, i) => (
+								<div
+									key={item.id}
+									className={`ac-item${i === acIndex ? ' active' : ''}`}
+									onMouseDown={(e) => { e.preventDefault(); selectAcItem(item); }}
+									onMouseEnter={() => setAcIndex(i)}
+								>
+									<span className="ac-label">{item.label}</span>
+									{item.desc && <span className="ac-desc">{item.desc}</span>}
+								</div>
+							))}
+						</div>
+					)}
+					<textarea
+						ref={textareaRef}
+						className="input-textarea"
+						value={inputText}
+						onChange={handleInputChange}
+						onKeyDown={handleKeyDown}
+						onPaste={handlePaste}
+						placeholder="输入消息... (Enter 发送, / Skills, @ History)"
+						rows={2}
+					/>
+				</div>
 				<button
 					className="btn-send"
 					onClick={handleSend}

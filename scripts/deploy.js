@@ -32,6 +32,8 @@ const filesToCopy = [
   'dist/wechat-engine.js',
   'dist/webview.js',
   'dist/webview.css',
+  'dist/wechat-webview.js',
+  'dist/wechat-webview.css',
   'dist/mcp-server.mjs',
   'package.json',
   'media/icon.svg',
@@ -51,7 +53,7 @@ for (const rel of filesToCopy) {
 }
 
 // 4. verify critical files exist and sizes match
-const criticalFiles = ['dist/extension.js', 'dist/wechat-engine.js', 'dist/webview.js'];
+const criticalFiles = ['dist/extension.js', 'dist/wechat-engine.js', 'dist/webview.js', 'dist/wechat-webview.js'];
 for (const rel of criticalFiles) {
   const srcPath = path.join(srcRoot, rel);
   const dstPath = path.join(extDir, rel);

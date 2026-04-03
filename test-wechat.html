@@ -1,130 +1,48 @@
 <!DOCTYPE html>
-<html><head><meta charset="UTF-8">
-<style>
-:root { --vscode-sideBar-foreground: #ccc; --vscode-sideBar-background: #1e1e1e; --vscode-descriptionForeground: #888; --vscode-button-background: #0e639c; --vscode-button-foreground: #fff; --vscode-panel-border: #444; --vscode-input-background: #3c3c3c; --vscode-input-foreground: #ccc; --vscode-font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-body { margin: 0; background: #1e1e1e; display: flex; justify-content: center; }
-#wechat-root { width: 320px; }
-</style>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<style>
+		body { margin: 0; background: #1e1e1e; display: flex; justify-content: center; }
+		#container { width: 320px; }
+	</style>
+	<link rel="stylesheet" href="dist/wechat-webview.css">
 </head>
 <body>
-<div id="wechat-root"></div>
+<div id="container">
+	<div id="root"><p style="padding:12px;color:#888;font-size:12px;">Loading...</p></div>
+</div>
 <script>
 const acquireVsCodeApi = () => ({
-  postMessage: (msg) => {
-    console.log('[postMessage]', JSON.stringify(msg));
-    if (msg.type === 'requestState') {
-      setTimeout(() => {
-        window.dispatchEvent(new MessageEvent('message', { data: {
-          type: 'fullState',
-          accounts: [
-            { id: 'wx_test1', name: '工作微信', isPrimary: true, state: 'connected', active: true, bindingSessions: [], qrDataUrl: null },
-            { id: 'wx_test2', name: '个人微信', isPrimary: false, state: 'idle', active: false, bindingSessions: [], qrDataUrl: null },
-          ],
-          loginPendingAccountId: null,
-        }}));
-      }, 100);
-    }
-  },
-  setState: () => {},
-  getState: () => null,
+	postMessage: (msg) => {
+		console.log('[postMessage]', JSON.stringify(msg));
+		if (msg.type === 'requestState') {
+			setTimeout(() => {
+				window.dispatchEvent(new MessageEvent('message', { data: {
+					type: 'fullState',
+					accounts: [
+						{ id: 'wx_test1', name: '工作微信', isPrimary: true, state: 'connected', active: true, bindingSessions: ['session-abc'], qrDataUrl: null },
+						{ id: 'wx_test2', name: '个人微信', isPrimary: false, state: 'idle', active: false, bindingSessions: [], qrDataUrl: null },
+					],
+					sessions: [
+						{ id: 'session-abc', name: 'AI Chat 1', alive: true },
+						{ id: 'session-def', name: 'Code Review', alive: true },
+						{ id: 'session-ghi', name: '旧会话', alive: false },
+					],
+					loginPendingAccountId: null,
+				}}));
+			}, 100);
+		}
+		if (msg.type === 'addAccount') {
+			console.log('[TEST] addAccount:', msg.name);
+		}
+	},
+	setState: () => {},
+	getState: () => null,
 });
-</script>
-<!-- Inline the WeChat panel HTML below -->
-<script>
-document.getElementById('wechat-root').innerHTML = `
-<style>
-:root { --fg: var(--vscode-sideBar-foreground); --bg: var(--vscode-sideBar-background); --muted: var(--vscode-descriptionForeground); --accent: var(--vscode-button-background); --accent-fg: var(--vscode-button-foreground); --border: var(--vscode-panel-border, #444); }
-* { margin: 0; padding: 0; box-sizing: border-box; }
-.wc { font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); padding: 8px; font-size: 13px; }
-.section-title { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
-.account-card { border: 1px solid var(--border); border-radius: 4px; padding: 8px; margin-bottom: 8px; }
-.account-card.primary { border-left: 3px solid #4caf50; }
-.account-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.dot.idle { background: #888; } .dot.logging_in, .dot.connecting { background: #f0a030; animation: pulse 1s infinite; }
-.dot.connected { background: #4caf50; } .dot.error { background: #f44; }
-@keyframes pulse { 50% { opacity: 0.4; } }
-.account-name { font-weight: 600; font-size: 12px; flex: 1; }
-.badge { font-size: 10px; padding: 1px 4px; border-radius: 3px; background: #4caf50; color: #fff; }
-.badge.active { background: #2196f3; }
-.account-actions { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
-.btn { padding: 4px 8px; border: none; border-radius: 3px; background: var(--accent); color: var(--accent-fg); cursor: pointer; font-size: 11px; }
-.btn:hover { opacity: 0.85; }
-.btn.sm { font-size: 10px; padding: 2px 6px; }
-.btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--fg); }
-.btn.danger { background: transparent; border: 1px solid #f44; color: #f44; }
-.qr-box { text-align: center; margin: 8px 0; }
-.qr-box img { max-width: 180px; border-radius: 4px; }
-.qr-box p { font-size: 11px; color: var(--muted); margin-top: 4px; }
-.add-section { margin-top: 8px; }
-.add-row { display: flex; gap: 4px; }
-.add-row input { flex: 1; padding: 4px 6px; border: 1px solid var(--border); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); font-size: 11px; }
-.info { font-size: 10px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
-.state-label { font-size: 11px; color: var(--muted); }
-</style>
-<div class="wc">
-<div class="section-title">微信账号</div>
-<div id="account-list"></div>
-<div class="add-section">
-  <div class="add-row">
-    <input id="new-name" placeholder="账号名称（如：工作微信）" />
-    <button class="btn sm" onclick="addAccount()">+ 添加</button>
-  </div>
-</div>
-<p class="info">
-  • 标记为"主渠道"的账号默认接收所有未绑定 session 的消息<br>
-  • 微信 30 分钟内无消息则暂停推送 AI 回复<br>
-  • 每个 session 可绑定到指定微信账号
-</p>
-</div>
-`;
-
 const vscode = acquireVsCodeApi();
-const stateLabels = { idle: '未连接', logging_in: '登录中...', connecting: '连接中...', connected: '已连接', error: '错误' };
-let currentAccounts = [];
-
-function post(type, data) { vscode.postMessage({ type, ...data }); }
-function addAccount() {
-  const inp = document.getElementById('new-name');
-  post('addAccount', { name: inp.value.trim() });
-  inp.value = '';
-}
-
-function renderAccounts(list, loginPendingId) {
-  currentAccounts = list;
-  const container = document.getElementById('account-list');
-  if (!list.length) { container.innerHTML = '<p style="color:var(--muted);font-size:12px;padding:8px 0;">尚未添加微信账号</p>'; return; }
-  container.innerHTML = list.map(a => {
-    const stateText = stateLabels[a.state] || a.state;
-    const showQr = a.qrDataUrl && a.state === 'logging_in';
-    const showLogin = a.state === 'idle' || a.state === 'error';
-    const showDisconnect = a.state === 'connected';
-    return '<div class="account-card' + (a.isPrimary ? ' primary' : '') + '">' +
-      '<div class="account-header">' +
-        '<div class="dot ' + a.state + '"></div>' +
-        '<span class="account-name">' + esc(a.name) + '</span>' +
-        (a.isPrimary ? '<span class="badge">主渠道</span>' : '') +
-        (a.active ? '<span class="badge active">活跃</span>' : '') +
-      '</div>' +
-      '<div class="state-label">' + stateText + '</div>' +
-      (showQr ? '<div class="qr-box"><img src="' + a.qrDataUrl + '" /><p>请用微信扫码</p></div>' : '') +
-      '<div class="account-actions">' +
-        (showLogin ? '<button class="btn sm" onclick="post(\'login\',{accountId:\'' + a.id + '\'})">扫码登录</button>' : '') +
-        (showDisconnect ? '<button class="btn sm secondary" onclick="post(\'disconnect\',{accountId:\'' + a.id + '\'})">断开</button>' : '') +
-        (!a.isPrimary && a.state !== 'logging_in' ? '<button class="btn sm secondary" onclick="post(\'setPrimary\',{accountId:\'' + a.id + '\'})">设为主渠道</button>' : '') +
-        (a.state === 'idle' ? '<button class="btn sm danger" onclick="if(confirm(\'确定删除?\'))post(\'removeAccount\',{accountId:\'' + a.id + '\'})">删除</button>' : '') +
-      '</div>' +
-    '</div>';
-  }).join('');
-}
-
-function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-window.addEventListener('message', e => {
-  const msg = e.data;
-  if (msg.type === 'fullState') renderAccounts(msg.accounts, msg.loginPendingAccountId);
-});
-
-post('requestState', {});
 </script>
-</body></html>
+<script src="dist/wechat-webview.js" onerror="document.getElementById('root').innerHTML='<p style=\'padding:12px;color:#f44;\'>Failed to load wechat-webview.js. Run: npm run build</p>';"></script>
+</body>
+</html>

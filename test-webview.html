@@ -23,10 +23,38 @@ body { margin: 0; background: #1e1e1e; }
 <div id="root"><p style="color:#888;padding:12px;">Loading...</p></div>
 <link rel="stylesheet" href="dist/webview.css" />
 <script>
-const vscode = {
-  postMessage: (msg) => console.log('[vscode.postMessage]', JSON.stringify(msg)),
-  setState: (s) => console.log('[vscode.setState]', JSON.stringify(s)),
-  getState: () => null,
+function mockSkills() {
+  var evt = new MessageEvent('message', { data: {
+    type: 'skillList',
+    skills: [
+      { name: 'multisession-dev', desc: 'MultiSession extension dev workflow' },
+      { name: 'api-test-manage', desc: 'API test service management' },
+      { name: 'cls-log-query', desc: 'CLS log query tool' },
+      { name: 'coding-ci-pipeline', desc: 'CI pipeline log analysis' },
+      { name: 'rainbow-config', desc: 'Rainbow config read/write' }
+    ]
+  }});
+  window.dispatchEvent(evt);
+}
+function mockHistory() {
+  var evt = new MessageEvent('message', { data: {
+    type: 'historyList',
+    items: [
+      { id: 'abc-123', name: '修复bug', mode: 'agent', subtitle: 'Edited extension.ts, engine.ts' },
+      { id: 'def-456', name: 'WeChat集成', mode: 'agent', subtitle: 'Added multi-account support' },
+      { id: 'ghi-789', name: '代码审查', mode: 'ask', subtitle: 'Reviewed PR #42' }
+    ]
+  }});
+  window.dispatchEvent(evt);
+}
+var vscode = {
+  postMessage: function(msg) {
+    console.log('[vscode.postMessage]', JSON.stringify(msg));
+    if (msg.type === 'requestSkills') setTimeout(mockSkills, 50);
+    if (msg.type === 'requestHistory') setTimeout(mockHistory, 50);
+  },
+  setState: function(s) { console.log('[vscode.setState]', JSON.stringify(s)); },
+  getState: function() { return null; }
 };
 window.acquireVsCodeApi = () => vscode;
 window.__EXT_VERSION__ = 'test';

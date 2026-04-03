@@ -104,27 +104,46 @@ npx serve . -l 3456
 ### 4. 文件大小检查
 ```bash
 ls -la ~/.cursor/extensions/local.cursor-multisession-*/dist/
-# extension.js     ~92kb  (主入口 + qrcode 库，不含 WeChat engine)
-# wechat-engine.js ~39kb  (WeChat 独立 bundle，懒加载)
-# webview.js       ~152kb (React UI)
+# extension.js        ~87kb   (主入口 + qrcode 库，不含 WeChat engine / 不含 inline HTML)
+# wechat-engine.js    ~39kb   (WeChat 引擎独立 bundle，懒加载)
+# webview.js          ~152kb  (MultiSession React UI)
+# wechat-webview.js   ~143kb  (WeChat React UI)
+# wechat-webview.css  ~3kb    (WeChat 样式)
 ```
 
 ## 构建产物
 
 ```
-src/extension.ts       ──esbuild──> dist/extension.js       (Node.js, CJS, ~29kb)
-src/wechat/engine.ts   ──esbuild──> dist/wechat-engine.js   (Node.js, CJS, ~39kb, 独立 bundle)
-src/webview/index.tsx   ──esbuild──> dist/webview.js         (Browser, IIFE, ~152kb)
-src/webview/webview.css ──copy────> dist/webview.css
-mcp-server/index.ts     ──esbuild──> dist/mcp-server.mjs    (Node.js, ESM, ~570kb)
+源文件                              构建目标                          平台/格式       大小
+─────────────────────────────────────────────────────────────────────────────────────────
+src/extension.ts                 → dist/extension.js                Node.js CJS    ~87kb
+src/wechat/engine.ts             → dist/wechat-engine.js            Node.js CJS    ~39kb
+src/webview/index.tsx            → dist/webview.js                  Browser IIFE   ~152kb
+src/webview/webview.css          → dist/webview.css                 CSS copy       ~12kb
+src/wechat-webview/index.tsx     → dist/wechat-webview.js           Browser IIFE   ~143kb
+src/wechat-webview/wechat.css    → dist/wechat-webview.css          CSS copy       ~3kb
+mcp-server/index.ts              → dist/mcp-server.mjs              Node.js ESM    ~570kb
 ```
 
-**关键架构决策**：WeChat engine 编译为独立 bundle (`wechat-engine.js`)，extension.ts 通过运行时 `require()` 懒加载。
-这避免了 `node:crypto`/`node:http` 等模块在插件激活阶段的副作用导致面板白屏。
+**关键架构决策**：
+1. **WeChat engine 隔离**：编译为独立 bundle (`wechat-engine.js`)，extension.ts 通过运行时 `require()` 懒加载，避免 `node:crypto`/`node:http` 等模块在激活阶段的副作用
+2. **两个 Webview 都用 React**：MultiSession (`webview.js`) 和 WeChat (`wechat-webview.js`) 均为独立 React bundle + CSS，由 `getHtml()` 通过 `webview.asWebviewUri()` 加载。不再使用 inline HTML 字符串拼接
 
 ## 已知坑点
 
-### 1. React 组件变量声明顺序（TDZ 错误）
+### 1. esbuild minify 破坏 inline HTML 中的引号（已解决，保留教训）
+
+**现状**：v0.6.0 起 WeChat 面板已改为独立 React bundle (`wechat-webview.js`)，此问题不再存在。
+但 `extension.ts` 的 `getHtml()` 中仍然有少量 inline HTML（仅加载 script/css 的骨架），需注意以下规则。
+
+**根因**：esbuild minify 模板字符串时，会将 `\'`（JS 中对单引号的转义）简化为 `'`，因为在反引号模板中单引号不需要转义。如果这段字符串输出到 HTML 的 `onclick` 属性中，引号嵌套就会被破坏，生成非法 HTML。
+
+**规则**：
+- **严禁在 JS 模板字符串中使用 inline `onclick`/`onchange` 等事件属性**
+- 所有 UI 交互逻辑必须放在 React 组件中（`src/webview/` 或 `src/wechat-webview/`）
+- `getHtml()` 中只放 HTML 骨架（`<link>` + `<script src>` + `<div id="root">`），不放业务逻辑
+
+### 2. React 组件变量声明顺序（TDZ 错误，严重）
 `useCallback` 在 `useState` 声明之前引用变量会导致 TDZ (Temporal Dead Zone) 错误。
 esbuild minify 后错误表现为 `Cannot access 'xx' before initialization`，非常难定位。
 
@@ -137,22 +156,23 @@ esbuild minify 后错误表现为 `Cannot access 'xx' before initialization`，�
 4. 如果 minify 后错误名被混淆（如 `cr`），用不加 `--minify` 的方式重新编译 webview 获取原始变量名
 5. 修复变量声明顺序后重新编译验证
 
-### 2. 浏览器独立验证（最重要的排查手段）
-项目根目录 `test-webview.html` mock 了 `acquireVsCodeApi`，可以在普通浏览器中验证 webview 渲染。
+### 3. 浏览器独立验证（最重要的排查手段，必须遵守）
+项目根目录 `test-webview.html` 和 `test-wechat.html` mock 了 `acquireVsCodeApi`，可以在普通浏览器中验证 webview 渲染。
 ```bash
 npx serve . -l 3456
-# 浏览器打开 http://localhost:3456/test-webview.html
+# MultiSession: http://localhost:3456/test-webview.html
+# WeChat:       http://localhost:3456/test-wechat.html
 # F12 查看 Console 错误
 ```
-这比在 Cursor 中反复 Reload Window 高效 10 倍以上。
+这比在 Cursor 中反复 Reload Window 高效 10 倍以上。**任何修改 webview/getHtml 的改动，必须先通过浏览器验证再部署。**
 
-### 3. deploy.js 清理逻辑
+### 4. deploy.js 清理逻辑
 deploy.js 会先删除 `~/.cursor/extensions/` 中所有旧版本再拷贝新文件，包含文件大小校验。
 
-### 4. CSP (Content Security Policy)
+### 5. CSP (Content Security Policy)
 当前版本不设置显式 CSP（Cursor webview 默认允许 inline script）。如果后续添加 CSP，需配合 nonce 且每次刷新都重新生成。
 
-### 5. WeChat 集成隔离
+### 6. WeChat 集成隔离
 WeChat engine 引入 `node:crypto`/`node:http` 等模块。在 extension host 中若模块加载阶段产生副作用会导致整个插件激活失败。
 **规则**：WeChat 代码必须懒加载（dynamic import 或延迟 require），不能在顶层 import。
 

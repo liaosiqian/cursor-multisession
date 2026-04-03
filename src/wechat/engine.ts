@@ -56,6 +56,14 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
   private lastMessageAt: number | null = null;
   private lastReplyAt: number | null = null;
   private pendingReply = false;
+  private accountId?: string;
+  private skipServer: boolean;
+
+  constructor(accountId?: string, options?: { skipServer?: boolean }) {
+    super();
+    this.accountId = accountId;
+    this.skipServer = options?.skipServer ?? false;
+  }
 
   getState(): EngineState {
     return this.state;
@@ -70,12 +78,12 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
   }
 
   hasCredentials(): boolean {
-    const creds = loadCredentials();
+    const creds = loadCredentials(this.accountId);
     return !!(creds?.token);
   }
 
   getCredentials(): StoredCredentials | null {
-    return loadCredentials();
+    return loadCredentials(this.accountId);
   }
 
   private setState(s: EngineState, detail?: string) {
@@ -121,7 +129,7 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
               botId: result.ilink_bot_id,
               userId: result.ilink_user_id,
               savedAt: new Date().toISOString(),
-            });
+            }, this.accountId);
             this.emit("loginSuccess", result);
             this.setState("idle");
             return;
@@ -152,7 +160,7 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
       const rawConfig = loadConfig();
       applyLogLevelFromConfig(rawConfig.logLevel);
 
-      const stored = loadCredentials();
+      const stored = loadCredentials(this.accountId);
       if (!stored?.token) {
         this.setState("idle");
         throw new Error("No credentials. Please login first.");
@@ -299,8 +307,18 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
         this.emit("error", err);
       });
 
-      this.server = createServer(this.client, this.media, rawConfig);
-      await startServer(this.server, rawConfig);
+      if (this.skipServer) {
+        logger.info("HTTP server skipped (extension mode)");
+        this.server = null;
+      } else {
+        try {
+          this.server = createServer(this.client, this.media, rawConfig);
+          await startServer(this.server, rawConfig);
+        } catch (serverErr: any) {
+          logger.warn(`HTTP server start failed (port ${rawConfig.serverPort}): ${serverErr.message} — continuing without server`);
+          this.server = null;
+        }
+      }
       await this.poller.start();
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -326,14 +344,14 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
 
   logout(): void {
     this.disconnect();
-    clearCredentials();
+    clearCredentials(this.accountId);
   }
 
   async sendScreenshot(toUserId?: string): Promise<string> {
     if (!this.client || !this.media) {
       throw new Error("Not connected");
     }
-    const creds = loadCredentials();
+    const creds = loadCredentials(this.accountId);
     const userId = toUserId ?? creds?.userId;
     if (!userId) throw new Error("No target user");
 
@@ -354,7 +372,7 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
 
   async sendTypingToUser(userId?: string): Promise<void> {
     if (!this.client) return;
-    const creds = loadCredentials();
+    const creds = loadCredentials(this.accountId);
     const uid = userId ?? creds?.userId;
     if (!uid) return;
     const ctx = loadContextToken(uid);
@@ -367,7 +385,7 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
 
   async cancelTypingToUser(userId?: string): Promise<void> {
     if (!this.client) return;
-    const creds = loadCredentials();
+    const creds = loadCredentials(this.accountId);
     const uid = userId ?? creds?.userId;
     if (!uid) return;
     const ctx = loadContextToken(uid);

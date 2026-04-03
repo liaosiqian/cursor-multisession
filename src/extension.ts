@@ -151,6 +151,81 @@ interface SlashResult {
 	isCommand: true;
 }
 
+function expandReferences(text: string): string {
+	const skillBlocks: string[] = [];
+	const historyBlocks: string[] = [];
+
+	const cleaned = text
+		.replace(/\[file: @skill:([^\]]+)\]/g, (_match, skillName: string) => {
+			const skills = scanSkillDirs();
+			const target = skills.find(s => s.name === skillName);
+			if (!target) return `[skill: ${skillName} — not found]`;
+			try {
+				const content = fs.readFileSync(target.skillPath, 'utf-8');
+				skillBlocks.push(
+					`Skill Name: ${skillName}\n` +
+					`Path: ${target.skillPath}\n` +
+					`SKILL.md content:\n${content}`
+				);
+			} catch { return `[skill: ${skillName} — read error]`; }
+			return '';
+		})
+		.replace(/\[file: @history:([^\]]+)\]/g, (_match, composerId: string) => {
+			const headers = loadComposerHeaders();
+			const h = headers.find(c => c.composerId === composerId);
+			if (!h) return `[history: ${composerId.substring(0, 8)} — not found]`;
+			const name = h.name || composerId.substring(0, 8);
+			const mode = h.unifiedMode || h.forceMode || '?';
+			const sub = h.subtitle || '';
+			const age = h.lastUpdatedAt ? formatDuration(Date.now() - h.lastUpdatedAt) : '';
+			const transcriptPath = findTranscriptPath(composerId);
+			historyBlocks.push(
+				`Chat: ${name}\n` +
+				`Mode: ${mode}, Last active: ${age || 'unknown'}\n` +
+				`Summary: ${sub}\n` +
+				(transcriptPath ? `Transcript: ${transcriptPath}` : `ID: ${composerId}`)
+			);
+			return '';
+		})
+		.trim();
+
+	const parts: string[] = [];
+
+	if (skillBlocks.length > 0) {
+		parts.push(
+			'<manually_attached_skills>\n' +
+			'The user has manually attached the following skills to their message.\n' +
+			'These skills contain specific instructions or workflows that you should follow for this request.\n\n' +
+			skillBlocks.join('\n\n---\n\n') +
+			'\n</manually_attached_skills>'
+		);
+	}
+
+	if (historyBlocks.length > 0) {
+		parts.push(
+			'<referenced_chats>\n' +
+			'The user has referenced the following past conversations for context.\n\n' +
+			historyBlocks.join('\n\n---\n\n') +
+			'\n</referenced_chats>'
+		);
+	}
+
+	if (cleaned) parts.push(cleaned);
+	return parts.join('\n\n');
+}
+
+function findTranscriptPath(composerId: string): string | null {
+	const projectsDir = path.join(os.homedir(), '.cursor', 'projects');
+	try {
+		for (const slug of fs.readdirSync(projectsDir)) {
+			const transcriptDir = path.join(projectsDir, slug, 'agent-transcripts', composerId);
+			const jsonl = path.join(transcriptDir, `${composerId}.jsonl`);
+			if (fs.existsSync(jsonl)) return jsonl;
+		}
+	} catch { /* ignore */ }
+	return null;
+}
+
 function tryHandlePanelSlashCommand(text: string, sessionId: string): SlashResult | null {
 	const trimmed = text.trim();
 	if (!trimmed.startsWith('/')) return null;
@@ -171,6 +246,10 @@ function tryHandlePanelSlashCommand(text: string, sessionId: string): SlashResul
 		case 'rename':
 			if (!args) return { isCommand: true, text: 'Usage: /rename <new name>\nExample: /rename my-project' };
 			return { isCommand: true, text: renameSession(sessionId, args) };
+		case 'skill':
+			return { isCommand: true, text: handleSkillCommand(args) };
+		case 'history':
+			return { isCommand: true, text: handleHistoryCommand(args) };
 		default:
 			return null;
 	}
@@ -213,7 +292,165 @@ function buildHelpResponse(): string {
 		'/help — Show this help',
 		'/session — List all sessions',
 		'/rename <name> — Rename current session',
+		'/skill — List available skills',
+		'/skill <name> — Load skill content into message',
+		'/history — List recent Composer conversations',
+		'/history <name> — Load conversation content',
 	].join('\n');
+}
+
+const cache = new Map<string, { data: any; ts: number }>();
+function cached<T>(key: string, ttlMs: number, fn: () => T): T {
+	const entry = cache.get(key);
+	if (entry && Date.now() - entry.ts < ttlMs) return entry.data as T;
+	const data = fn();
+	cache.set(key, { data, ts: Date.now() });
+	return data;
+}
+
+function scanSkillDirs(): { name: string; dir: string; skillPath: string }[] {
+	return cached('skills', 30_000, () => {
+		const results: { name: string; dir: string; skillPath: string }[] = [];
+		const wsPaths = getWorkspacePaths();
+		const seen = new Set<string>();
+		for (const ws of wsPaths) {
+			const skillsRoot = path.join(ws, '.cursor', 'skills');
+			if (!fs.existsSync(skillsRoot)) continue;
+			try {
+				for (const entry of fs.readdirSync(skillsRoot, { withFileTypes: true })) {
+					if (!entry.isDirectory() || entry.name.startsWith('_') || entry.name.startsWith('.')) continue;
+					const skillMd = path.join(skillsRoot, entry.name, 'SKILL.md');
+					if (fs.existsSync(skillMd) && !seen.has(entry.name)) {
+						seen.add(entry.name);
+						results.push({ name: entry.name, dir: path.join(skillsRoot, entry.name), skillPath: skillMd });
+					}
+				}
+			} catch {}
+		}
+		const userSkills = path.join(os.homedir(), '.cursor', 'skills-cursor');
+		if (fs.existsSync(userSkills)) {
+			try {
+				for (const entry of fs.readdirSync(userSkills, { withFileTypes: true })) {
+					if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+					const skillMd = path.join(userSkills, entry.name, 'SKILL.md');
+					if (fs.existsSync(skillMd) && !seen.has(entry.name)) {
+						seen.add(entry.name);
+						results.push({ name: entry.name, dir: path.join(userSkills, entry.name), skillPath: skillMd });
+					}
+				}
+			} catch {}
+		}
+		return results;
+	});
+}
+
+function handleSkillCommand(args: string): string {
+	const skills = scanSkillDirs();
+	if (!args) {
+		if (skills.length === 0) return 'No skills found in .cursor/skills/ directories.';
+		const lines = ['--- Available Skills ---'];
+		for (const s of skills) {
+			const content = fs.readFileSync(s.skillPath, 'utf-8');
+			const firstLine = content.split('\n').find(l => l.trim())?.replace(/^#+\s*/, '') || '';
+			lines.push(`• **${s.name}** — ${firstLine.substring(0, 80)}`);
+		}
+		lines.push('', 'Usage: /skill <name> to load skill content');
+		return lines.join('\n');
+	}
+	const target = skills.find(s => s.name.toLowerCase() === args.toLowerCase());
+	if (!target) return `Skill "${args}" not found. Use /skill to list available skills.`;
+	try {
+		const content = fs.readFileSync(target.skillPath, 'utf-8');
+		return `--- Skill: ${target.name} ---\n${target.skillPath}\n\n${content}`;
+	} catch (e: any) {
+		return `Error reading skill: ${e.message}`;
+	}
+}
+
+interface ComposerHeader {
+	composerId: string;
+	name?: string;
+	createdAt?: number;
+	lastUpdatedAt?: number;
+	subtitle?: string;
+	unifiedMode?: string;
+	forceMode?: string;
+	isArchived?: boolean;
+	isDraft?: boolean;
+	filesChangedCount?: number;
+	totalLinesAdded?: number;
+	totalLinesRemoved?: number;
+}
+
+function loadComposerHeaders(): ComposerHeader[] {
+	return cached('composerHeaders', 60_000, () => {
+		try {
+			const dbPath = path.join(os.homedir(), 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage', 'state.vscdb');
+			if (!fs.existsSync(dbPath)) return [];
+			const Database = require('better-sqlite3');
+			const db = new Database(dbPath, { readonly: true });
+			const row = db.prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerHeaders'").get() as any;
+			db.close();
+			if (!row?.value) return [];
+			const parsed = JSON.parse(row.value);
+			return (parsed.allComposers || []) as ComposerHeader[];
+		} catch {
+			return loadComposerHeadersFallback();
+		}
+	});
+}
+
+function loadComposerHeadersFallback(): ComposerHeader[] {
+	try {
+		const { execSync } = require('child_process');
+		const dbPath = path.join(os.homedir(), 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage', 'state.vscdb');
+		const raw = execSync(`sqlite3 "${dbPath}" "SELECT value FROM ItemTable WHERE key = 'composer.composerHeaders';"`, { encoding: 'utf-8', timeout: 5000 });
+		if (!raw.trim()) return [];
+		const parsed = JSON.parse(raw.trim());
+		return (parsed.allComposers || []) as ComposerHeader[];
+	} catch {
+		return [];
+	}
+}
+
+function handleHistoryCommand(args: string): string {
+	const headers = loadComposerHeaders();
+	if (headers.length === 0) return 'No Composer history found (state.vscdb not accessible).';
+
+	const sorted = headers
+		.filter(h => !h.isArchived && h.name)
+		.sort((a, b) => (b.lastUpdatedAt || b.createdAt || 0) - (a.lastUpdatedAt || a.createdAt || 0));
+
+	if (!args) {
+		const recent = sorted.slice(0, 15);
+		const lines = ['--- Recent Conversations ---'];
+		for (const h of recent) {
+			const age = h.lastUpdatedAt ? formatDuration(Date.now() - h.lastUpdatedAt) : '?';
+			const mode = h.unifiedMode || '?';
+			lines.push(`• **${h.name}** [${mode}] — ${age} ago`);
+			if (h.subtitle) lines.push(`  ${h.subtitle}`);
+		}
+		lines.push('', `Total: ${sorted.length} conversations`);
+		lines.push('Usage: /history <keyword> to search');
+		return lines.join('\n');
+	}
+
+	const keyword = args.toLowerCase();
+	const matches = sorted.filter(h =>
+		(h.name || '').toLowerCase().includes(keyword) ||
+		(h.subtitle || '').toLowerCase().includes(keyword) ||
+		(h.composerId || '').toLowerCase().includes(keyword)
+	);
+
+	if (matches.length === 0) return `No conversations matching "${args}".`;
+	const lines = [`--- Conversations matching "${args}" (${matches.length}) ---`];
+	for (const h of matches.slice(0, 20)) {
+		const age = h.lastUpdatedAt ? formatDuration(Date.now() - h.lastUpdatedAt) : '?';
+		lines.push(`• **${h.name}** [${h.unifiedMode || '?'}] — ${age} ago`);
+		lines.push(`  ID: ${h.composerId}`);
+		if (h.subtitle) lines.push(`  ${h.subtitle}`);
+	}
+	return lines.join('\n');
 }
 
 function buildSessionResponse(): string {
@@ -442,7 +679,7 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 			if (view.visible) syncState();
 		});
 
-		view.webview.onDidReceiveMessage(msg => {
+		view.webview.onDidReceiveMessage(async msg => {
 			markThisWindowActive();
 
 			switch (msg.type) {
@@ -493,6 +730,7 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 				}
 
 				let content = msg.text || '';
+				content = expandReferences(content);
 				if (imagePaths.length > 0) {
 					const imgRefs = imagePaths.map(p => `[image: ${p}]`).join('\n');
 					content = content ? `${content}\n${imgRefs}` : imgRefs;
@@ -608,6 +846,93 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 						s.alive = false;
 						writeJson(SESSIONS_FILE, sessions);
 					}
+					break;
+				}
+
+				case 'pickFile': {
+					const uris = await vscode.window.showOpenDialog({
+						canSelectFiles: true,
+						canSelectFolders: false,
+						canSelectMany: true,
+						title: '选择文件附加到消息',
+					});
+					if (uris) {
+						for (const uri of uris) {
+							panel?.webview.postMessage({
+								type: 'sharedFile',
+								data: { path: uri.fsPath, name: path.basename(uri.fsPath) },
+							});
+						}
+					}
+					break;
+				}
+
+				case 'pickFolder': {
+					const uris = await vscode.window.showOpenDialog({
+						canSelectFiles: false,
+						canSelectFolders: true,
+						canSelectMany: false,
+						title: '选择文件夹附加到消息',
+					});
+					if (uris?.[0]) {
+						panel?.webview.postMessage({
+							type: 'sharedFile',
+							data: { path: uris[0].fsPath, name: path.basename(uris[0].fsPath) + '/' },
+						});
+					}
+					break;
+				}
+
+				case 'loadSkillContent': {
+					const skills = scanSkillDirs();
+					const target = skills.find(s => s.name === msg.skillName);
+					if (target) {
+						try {
+							const content = fs.readFileSync(target.skillPath, 'utf-8');
+							panel?.webview.postMessage({
+								type: 'skillContent',
+								skillName: target.name,
+								content,
+								path: target.skillPath,
+							});
+						} catch (e: any) {
+							output.appendLine(`[skill] read error: ${e.message}`);
+						}
+					}
+					break;
+				}
+
+				case 'requestSkills': {
+					const skills = scanSkillDirs();
+					const list = skills.map(s => {
+						try {
+							const content = fs.readFileSync(s.skillPath, 'utf-8');
+							const firstLine = content.split('\n').find(l => l.trim())?.replace(/^#+\s*/, '') || '';
+							return { name: s.name, desc: firstLine.substring(0, 60) };
+						} catch { return { name: s.name, desc: '' }; }
+					});
+					panel?.webview.postMessage({ type: 'skillList', skills: list });
+					break;
+				}
+
+				case 'requestHistory': {
+					const headers = loadComposerHeaders();
+					const sorted = headers
+						.filter(h => !h.isArchived && !h.isDraft)
+						.sort((a, b) => (b.lastUpdatedAt || b.createdAt || 0) - (a.lastUpdatedAt || a.createdAt || 0))
+						.slice(0, 25);
+					const list = sorted.map(h => {
+						const ts = h.lastUpdatedAt || h.createdAt || 0;
+						const age = ts ? formatDuration(Date.now() - ts) : '';
+						const mode = h.unifiedMode || h.forceMode || '?';
+						const name = h.name || h.subtitle || h.composerId.substring(0, 8);
+						const parts: string[] = [];
+						parts.push(`[${mode}]`);
+						if (age) parts.push(age);
+						if (h.filesChangedCount) parts.push(`${h.filesChangedCount} files`);
+						return { id: h.composerId, label: name, desc: parts.join(' · ') };
+					});
+					panel?.webview.postMessage({ type: 'historyList', items: list });
 					break;
 				}
 			}
@@ -730,9 +1055,25 @@ function isAccountActive(entry: AccountEntry): boolean {
 	return entry.lastActivityTs > 0 && (Date.now() - entry.lastActivityTs) < ACTIVITY_TIMEOUT_MS;
 }
 
+function syncBindingsToRouter(accountId: string): void {
+	const entry = accounts.get(accountId);
+	if (!entry?.engine) return;
+	const router = entry.engine.getRouter?.();
+	if (!router) {
+		output.appendLine(`[wechat:${entry.account.name}] no router available for binding sync`);
+		return;
+	}
+	const bindings = entry.account.bindingSessions;
+	if (bindings.length > 0) {
+		const defaultSession = bindings[0];
+		router.setDefaultSession?.(defaultSession);
+		output.appendLine(`[wechat:${entry.account.name}] router default session set to ${defaultSession}`);
+	}
+}
+
 function createEngine(accountId: string): any {
 	const { ClawBotEngine } = requireEngineModule();
-	const engine = new ClawBotEngine();
+	const engine = new ClawBotEngine(accountId, { skipServer: true });
 	const entry = accounts.get(accountId)!;
 
 	engine.on('stateChange', (state: string, detail?: string) => {
@@ -757,7 +1098,10 @@ function createEngine(accountId: string): any {
 		entry.qrDataUrl = undefined;
 		loginPendingAccountId = undefined;
 		vscode.window.showInformationMessage(`WeChat [${entry.account.name}] 登录成功`);
-		try { await engine.connect(); } catch (err: any) {
+		try {
+			await engine.connect();
+			syncBindingsToRouter(accountId);
+		} catch (err: any) {
 			output.appendLine(`[wechat:${entry.account.name}] auto-connect failed: ${err.message}`);
 		}
 	});
@@ -791,7 +1135,8 @@ function pushFullState() {
 		active: isAccountActive(e),
 		bindingSessions: e.account.bindingSessions,
 	}));
-	wechatPanel.webview.postMessage({ type: 'fullState', accounts: list, loginPendingAccountId });
+	const sessions = getSessionsForThisWorkspace().map(s => ({ id: s.id, name: s.name, alive: s.alive }));
+	wechatPanel.webview.postMessage({ type: 'fullState', accounts: list, sessions, loginPendingAccountId });
 }
 
 function updateWechatStatusBar() {
@@ -812,6 +1157,27 @@ function updateWechatStatusBar() {
 
 function restoreSavedAccounts() {
 	const saved = loadAccounts();
+	if (saved.length === 0) {
+		const credsPath = path.join(os.homedir(), '.clawbot', 'credentials.json');
+		try {
+			if (fs.existsSync(credsPath)) {
+				const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+				if (creds?.token) {
+					const id = `wx_migrated`;
+					const acct: WeChatAccount = { id, name: '微信', isPrimary: true, bindingSessions: [] };
+					const entry: AccountEntry = { account: acct, engine: null, state: 'idle', lastActivityTs: 0 };
+					accounts.set(id, entry);
+					saveAccounts();
+					// copy credentials to account-specific directory
+					const accountDir = path.join(os.homedir(), '.clawbot', 'accounts', id);
+					fs.mkdirSync(accountDir, { recursive: true });
+					fs.copyFileSync(credsPath, path.join(accountDir, 'credentials.json'));
+					output.appendLine(`[wechat] migrated legacy credentials to account: 微信`);
+					return;
+				}
+			}
+		} catch { /* ignore */ }
+	}
 	for (const acct of saved) {
 		const entry: AccountEntry = {
 			account: acct,
@@ -822,15 +1188,43 @@ function restoreSavedAccounts() {
 		accounts.set(acct.id, entry);
 	}
 	output.appendLine(`[wechat] restored ${saved.length} saved accounts`);
+
+	setTimeout(() => {
+		for (const acct of saved) {
+			const credsDir = path.join(os.homedir(), '.clawbot', 'accounts', acct.id, 'credentials.json');
+			try {
+				if (fs.existsSync(credsDir)) {
+					const creds = JSON.parse(fs.readFileSync(credsDir, 'utf-8'));
+					if (creds?.token) {
+						const entry = accounts.get(acct.id);
+						if (entry && !entry.engine) {
+							output.appendLine(`[wechat:${acct.name}] has saved credentials, auto-connecting...`);
+							entry.engine = createEngine(acct.id);
+							entry.engine.connect().then(() => {
+								syncBindingsToRouter(acct.id);
+								output.appendLine(`[wechat:${acct.name}] auto-reconnected`);
+							}).catch((err: any) => {
+								output.appendLine(`[wechat:${acct.name}] auto-reconnect failed: ${err.message}`);
+							});
+						}
+					}
+				}
+			} catch (e: any) {
+				output.appendLine(`[wechat:${acct.name}] credential check failed: ${e.message}`);
+			}
+		}
+	}, 2000);
 }
 
 class WeChatViewProvider implements vscode.WebviewViewProvider {
+	constructor(private ctx: vscode.ExtensionContext) {}
 	resolveWebviewView(view: vscode.WebviewView) {
 		wechatPanel = view;
 		view.webview.options = { enableScripts: true };
-		view.webview.html = this.getHtml();
+		view.webview.html = this.getHtml(view.webview);
 
 		view.webview.onDidReceiveMessage(async (msg) => {
+			output.appendLine(`[wechat] received message: ${JSON.stringify(msg).substring(0, 200)}`);
 			try {
 				switch (msg.type) {
 					case 'addAccount': {
@@ -903,6 +1297,7 @@ class WeChatViewProvider implements vscode.WebviewViewProvider {
 						if (!entry.account.bindingSessions.includes(msg.sessionId)) {
 							entry.account.bindingSessions.push(msg.sessionId);
 							saveAccounts();
+							syncBindingsToRouter(msg.accountId);
 							pushFullState();
 						}
 						break;
@@ -912,6 +1307,7 @@ class WeChatViewProvider implements vscode.WebviewViewProvider {
 						if (!entry) break;
 						entry.account.bindingSessions = entry.account.bindingSessions.filter((s: string) => s !== msg.sessionId);
 						saveAccounts();
+						syncBindingsToRouter(msg.accountId);
 						pushFullState();
 						break;
 					}
@@ -930,103 +1326,29 @@ class WeChatViewProvider implements vscode.WebviewViewProvider {
 		output.appendLine('[wechat] panel resolved');
 	}
 
-	private getHtml(): string {
+	private getHtml(webview: vscode.Webview): string {
+		const scriptUri = webview.asWebviewUri(
+			vscode.Uri.joinPath(this.ctx.extensionUri, 'dist', 'wechat-webview.js')
+		);
+		const cssUri = webview.asWebviewUri(
+			vscode.Uri.joinPath(this.ctx.extensionUri, 'dist', 'wechat-webview.css')
+		);
+		output.appendLine(`[wechat] scriptUri: ${scriptUri}`);
+		output.appendLine(`[wechat] cssUri: ${cssUri}`);
+		const cacheBust = IS_DEV ? `?t=${Date.now()}` : '';
 		return `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>
-:root { --fg: var(--vscode-sideBar-foreground); --bg: var(--vscode-sideBar-background); --muted: var(--vscode-descriptionForeground); --accent: var(--vscode-button-background); --accent-fg: var(--vscode-button-foreground); --border: var(--vscode-panel-border, #444); }
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); padding: 8px; font-size: 13px; }
-.section-title { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
-.account-card { border: 1px solid var(--border); border-radius: 4px; padding: 8px; margin-bottom: 8px; }
-.account-card.primary { border-left: 3px solid #4caf50; }
-.account-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.dot.idle { background: #888; } .dot.logging_in, .dot.connecting { background: #f0a030; animation: pulse 1s infinite; }
-.dot.connected { background: #4caf50; } .dot.error { background: #f44; }
-@keyframes pulse { 50% { opacity: 0.4; } }
-.account-name { font-weight: 600; font-size: 12px; flex: 1; }
-.account-name.editable { cursor: pointer; }
-.badge { font-size: 10px; padding: 1px 4px; border-radius: 3px; background: #4caf50; color: #fff; }
-.badge.active { background: #2196f3; }
-.account-actions { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
-.btn { padding: 4px 8px; border: none; border-radius: 3px; background: var(--accent); color: var(--accent-fg); cursor: pointer; font-size: 11px; }
-.btn:hover { opacity: 0.85; }
-.btn.sm { font-size: 10px; padding: 2px 6px; }
-.btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--fg); }
-.btn.danger { background: transparent; border: 1px solid #f44; color: #f44; }
-.qr-box { text-align: center; margin: 8px 0; }
-.qr-box img { max-width: 180px; border-radius: 4px; }
-.qr-box p { font-size: 11px; color: var(--muted); margin-top: 4px; }
-.add-section { margin-top: 8px; }
-.add-row { display: flex; gap: 4px; }
-.add-row input { flex: 1; padding: 4px 6px; border: 1px solid var(--border); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); font-size: 11px; }
-.info { font-size: 10px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
-.state-label { font-size: 11px; color: var(--muted); }
-</style></head>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link rel="stylesheet" href="${cssUri}${cacheBust}">
+</head>
 <body>
-<div class="section-title">微信账号</div>
-<div id="account-list"></div>
-<div class="add-section">
-	<div class="add-row">
-		<input id="new-name" placeholder="账号名称（如：工作微信）" />
-		<button class="btn sm" onclick="addAccount()">+ 添加</button>
-	</div>
-</div>
-<p class="info">
-	• 标记为"主渠道"的账号默认接收所有未绑定 session 的消息<br>
-	• 微信 30 分钟内无消息则暂停推送 AI 回复<br>
-	• 每个 session 可绑定到指定微信账号
-</p>
-<script>
-const vscode = acquireVsCodeApi();
-const stateLabels = { idle: '未连接', logging_in: '登录中...', connecting: '连接中...', connected: '已连接', error: '错误' };
-let currentAccounts = [];
-
-function post(type, data) { vscode.postMessage({ type, ...data }); }
-function addAccount() {
-	const inp = document.getElementById('new-name');
-	post('addAccount', { name: inp.value.trim() });
-	inp.value = '';
-}
-
-function renderAccounts(list, loginPendingId) {
-	currentAccounts = list;
-	const container = document.getElementById('account-list');
-	if (!list.length) { container.innerHTML = '<p style="color:var(--muted);font-size:12px;padding:8px 0;">尚未添加微信账号</p>'; return; }
-	container.innerHTML = list.map(a => {
-		const stateText = stateLabels[a.state] || a.state;
-		const showQr = a.qrDataUrl && a.state === 'logging_in';
-		const showLogin = a.state === 'idle' || a.state === 'error';
-		const showDisconnect = a.state === 'connected';
-		return '<div class="account-card' + (a.isPrimary ? ' primary' : '') + '">' +
-			'<div class="account-header">' +
-				'<div class="dot ' + a.state + '"></div>' +
-				'<span class="account-name">' + esc(a.name) + '</span>' +
-				(a.isPrimary ? '<span class="badge">主渠道</span>' : '') +
-				(a.active ? '<span class="badge active">活跃</span>' : '') +
-			'</div>' +
-			'<div class="state-label">' + stateText + '</div>' +
-			(showQr ? '<div class="qr-box"><img src="' + a.qrDataUrl + '" /><p>请用微信扫码</p></div>' : '') +
-			'<div class="account-actions">' +
-				(showLogin ? '<button class="btn sm" onclick="post(\'login\',{accountId:\'' + a.id + '\'})">扫码登录</button>' : '') +
-				(showDisconnect ? '<button class="btn sm secondary" onclick="post(\'disconnect\',{accountId:\'' + a.id + '\'})">断开</button>' : '') +
-				(!a.isPrimary && a.state !== 'logging_in' ? '<button class="btn sm secondary" onclick="post(\'setPrimary\',{accountId:\'' + a.id + '\'})">设为主渠道</button>' : '') +
-				(a.state === 'idle' ? '<button class="btn sm danger" onclick="if(confirm(\'确定删除?\'))post(\'removeAccount\',{accountId:\'' + a.id + '\'})">删除</button>' : '') +
-			'</div>' +
-		'</div>';
-	}).join('');
-}
-
-function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-window.addEventListener('message', e => {
-	const msg = e.data;
-	if (msg.type === 'fullState') renderAccounts(msg.accounts, msg.loginPendingAccountId);
-});
-
-post('requestState', {});
-</script>
-</body></html>`;
+	<div id="root"><p style="padding:12px;color:var(--vscode-descriptionForeground);font-size:12px;">Loading...</p></div>
+	<script>const vscode = acquireVsCodeApi();</script>
+	<script src="${scriptUri}${cacheBust}" onerror="document.getElementById('root').innerHTML='<p style=\\'padding:12px;color:#f44;\\'>Failed to load wechat-webview.js</p>';"></script>
+</body>
+</html>`;
 	}
 }
 
@@ -1070,7 +1392,8 @@ export function activate(ctx: vscode.ExtensionContext) {
 	// ── WeChat panel ──
 	restoreSavedAccounts();
 	ctx.subscriptions.push(
-		vscode.window.registerWebviewViewProvider('multiSession.wechat', new WeChatViewProvider())
+		vscode.window.registerWebviewViewProvider('multiSession.wechat', new WeChatViewProvider(ctx),
+			{ webviewOptions: { retainContextWhenHidden: true } })
 	);
 	output.appendLine('[activate] WeChat panel provider registered');
 

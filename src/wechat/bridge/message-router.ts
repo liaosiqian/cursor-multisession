@@ -39,17 +39,28 @@ function saveStore(store: ActiveSessionStore): void {
  */
 export class MessageRouter {
   private activeMap: ActiveSessionStore;
+  private defaultSessionId: string | null = null;
 
   constructor() {
     this.activeMap = loadStore();
   }
 
+  setDefaultSession(sessionId: string): void {
+    this.defaultSessionId = sessionId;
+    logger.info({ sessionId }, "default session set for this router");
+  }
+
   /**
    * Get the active session ID for a user.
-   * Falls back to the most recently active alive session if none is set
-   * or the stored one is no longer alive.
+   * Priority: defaultSessionId (from binding) > activeMap (from /use) > fallback.
    */
   getActiveSession(userId: string): string | null {
+    if (this.defaultSessionId) {
+      const alive = listSessions();
+      if (alive.some(s => s.id === this.defaultSessionId)) {
+        return this.defaultSessionId;
+      }
+    }
     const stored = this.activeMap[userId];
     if (stored) {
       const alive = listSessions();
@@ -114,6 +125,18 @@ export class MessageRouter {
   }
 
   private fallbackSession(userId: string): string | null {
+    if (this.defaultSessionId) {
+      const alive = listSessions();
+      if (alive.some(s => s.id === this.defaultSessionId)) {
+        this.activeMap[userId] = this.defaultSessionId!;
+        saveStore(this.activeMap);
+        logger.info(
+          { userId, sessionId: this.defaultSessionId },
+          "using configured default session",
+        );
+        return this.defaultSessionId;
+      }
+    }
     const alive = listSessions();
     if (alive.length === 0) return null;
     alive.sort((a, b) => b.lastActiveAt - a.lastActiveAt);

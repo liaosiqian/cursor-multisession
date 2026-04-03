@@ -15,14 +15,15 @@ export interface ContextTokenStore {
   [userId: string]: string;
 }
 
-function resolveDataDir(): string {
-  const dir = process.env.CLAWBOT_DATA_DIR ?? path.join(os.homedir(), ".clawbot");
+function resolveDataDir(accountId?: string): string {
+  const base = process.env.CLAWBOT_DATA_DIR ?? path.join(os.homedir(), ".clawbot");
+  const dir = accountId ? path.join(base, "accounts", accountId) : base;
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-function credentialsPath(): string {
-  return path.join(resolveDataDir(), "credentials.json");
+function credentialsPath(accountId?: string): string {
+  return path.join(resolveDataDir(accountId), "credentials.json");
 }
 
 function contextTokensPath(): string {
@@ -31,19 +32,19 @@ function contextTokensPath(): string {
 
 // ── Credentials ──
 
-export function saveCredentials(creds: StoredCredentials): void {
-  const filePath = credentialsPath();
+export function saveCredentials(creds: StoredCredentials, accountId?: string): void {
+  const filePath = credentialsPath(accountId);
   fs.writeFileSync(filePath, JSON.stringify(creds, null, 2), "utf-8");
   try {
     fs.chmodSync(filePath, 0o600);
   } catch {
     // best-effort
   }
-  logger.info("credentials saved");
+  logger.info(`credentials saved${accountId ? ` (account: ${accountId})` : ''}`);
 }
 
-export function loadCredentials(): StoredCredentials | null {
-  const filePath = credentialsPath();
+export function loadCredentials(accountId?: string): StoredCredentials | null {
+  const filePath = credentialsPath(accountId);
   try {
     if (!fs.existsSync(filePath)) return null;
     return JSON.parse(fs.readFileSync(filePath, "utf-8")) as StoredCredentials;
@@ -52,9 +53,9 @@ export function loadCredentials(): StoredCredentials | null {
   }
 }
 
-export function clearCredentials(): void {
+export function clearCredentials(accountId?: string): void {
   try {
-    fs.unlinkSync(credentialsPath());
+    fs.unlinkSync(credentialsPath(accountId));
   } catch {
     // ignore
   }

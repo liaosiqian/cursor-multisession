@@ -89,10 +89,11 @@
 	"scripts": {
 		"compile:wechat": "esbuild src/wechat/engine.ts --bundle --outfile=dist/wechat-engine.js --format=cjs --platform=node --minify",
 		"compile:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:./wechat-engine.js --format=cjs --platform=node --minify",
-		"compile:css": "node -e \"require('fs').copyFileSync('src/webview/webview.css','dist/webview.css')\"",
+		"compile:css": "node -e \"require('fs').copyFileSync('src/webview/webview.css','dist/webview.css');require('fs').copyFileSync('src/wechat-webview/wechat.css','dist/wechat-webview.css')\"",
 		"compile:webview": "esbuild src/webview/index.tsx --bundle --outfile=dist/webview.js --format=iife --platform=browser --minify && npm run compile:css",
+		"compile:wechat-webview": "esbuild src/wechat-webview/index.tsx --bundle --outfile=dist/wechat-webview.js --format=iife --platform=browser --minify",
 		"compile:mcp": "esbuild mcp-server/index.ts --bundle --outfile=dist/mcp-server.mjs --format=esm --platform=node --minify",
-		"compile": "npm run compile:wechat && npm run compile:ext && npm run compile:webview && npm run compile:mcp",
+		"compile": "npm run compile:wechat && npm run compile:ext && npm run compile:webview && npm run compile:wechat-webview && npm run compile:mcp",
 		"build": "npm run compile",
 		"watch:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --watch",
 		"watch:webview": "esbuild src/webview/index.tsx --bundle --outfile=dist/webview.js --format=iife --platform=browser --watch",
