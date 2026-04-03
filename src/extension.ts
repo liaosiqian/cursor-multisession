@@ -2,8 +2,9 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { ClawBotEngine } from './wechat/engine';
-import { captureAndCleanup } from './wechat/screenshot';
+// WeChat imports disabled for debugging -- uncomment when webview rendering is confirmed stable
+// import { ClawBotEngine } from './wechat/engine';
+// import { captureAndCleanup } from './wechat/screenshot';
 
 const DATA_ROOT = path.join(os.homedir(), '.multisession');
 const SESSIONS_FILE = path.join(DATA_ROOT, 'sessions.json');
@@ -639,279 +640,19 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 	}
 }
 
-// ── WeChat webview provider ──
-
-let wechatEngine: ClawBotEngine | undefined;
+// ── WeChat webview provider (stub — engine disabled for now) ──
 
 class WeChatViewProvider implements vscode.WebviewViewProvider {
-	private view?: vscode.WebviewView;
-	private engine: ClawBotEngine;
-
-	constructor(private ctx: vscode.ExtensionContext, engine: ClawBotEngine) {
-		this.engine = engine;
-	}
-
 	resolveWebviewView(webviewView: vscode.WebviewView) {
-		this.view = webviewView;
-
-		webviewView.webview.options = {
-			enableScripts: true,
-			localResourceRoots: [vscode.Uri.joinPath(this.ctx.extensionUri, 'dist')],
-		};
-
-		webviewView.webview.html = this.getHtml();
-
-		webviewView.webview.onDidReceiveMessage((msg) => {
-			switch (msg.command) {
-				case 'login':
-					this.engine.login();
-					break;
-				case 'connect':
-					this.engine.connect().catch((err: Error) => {
-						vscode.window.showErrorMessage(`WeChat connect failed: ${err.message}`);
-					});
-					break;
-				case 'disconnect':
-					this.engine.disconnect();
-					break;
-				case 'cancelLogin':
-					this.engine.cancelLogin();
-					break;
-				case 'screenshot':
-					vscode.commands.executeCommand('multiSession.wechatScreenshot');
-					break;
-				case 'getState':
-					this.postMessage({
-						type: 'stateChange',
-						state: this.engine.getState(),
-						hasCredentials: this.engine.hasCredentials(),
-					});
-					break;
-			}
-		});
-
-		this.postMessage({
-			type: 'stateChange',
-			state: this.engine.getState(),
-			hasCredentials: this.engine.hasCredentials(),
-		});
-	}
-
-	postMessage(msg: unknown) {
-		this.view?.webview.postMessage(msg);
-	}
-
-	private getHtml(): string {
-		return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
-  :root {
-    --bg: var(--vscode-sideBar-background);
-    --fg: var(--vscode-sideBar-foreground);
-    --btn-bg: var(--vscode-button-background);
-    --btn-fg: var(--vscode-button-foreground);
-    --btn-hover: var(--vscode-button-hoverBackground);
-    --border: var(--vscode-panel-border);
-    --success: var(--vscode-charts-green);
-    --error: var(--vscode-errorForeground);
-    --muted: var(--vscode-descriptionForeground);
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
-    color: var(--fg);
-    background: var(--bg);
-    padding: 12px;
-    line-height: 1.5;
-  }
-  .section { margin-bottom: 16px; }
-  .status-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    border-radius: 12px;
-    font-size: 12px;
-    font-weight: 500;
-    border: 1px solid var(--border);
-  }
-  .status-badge.connected { color: var(--success); border-color: var(--success); }
-  .status-badge.error { color: var(--error); border-color: var(--error); }
-  .status-badge .dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: currentColor;
-  }
-  .status-badge.connected .dot { animation: pulse 2s infinite; }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
-  .btn {
-    display: block;
-    width: 100%;
-    padding: 8px 16px;
-    border: none;
-    border-radius: 4px;
-    background: var(--btn-bg);
-    color: var(--btn-fg);
-    font-size: 13px;
-    cursor: pointer;
-    margin-bottom: 8px;
-    text-align: center;
-  }
-  .btn:hover { background: var(--btn-hover); }
-  .btn:disabled { opacity: 0.5; cursor: default; }
-  .btn.secondary {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
-  }
-  .btn.secondary:hover { background: var(--vscode-list-hoverBackground); }
-  .btn.danger {
-    background: var(--vscode-inputValidation-errorBackground);
-    color: var(--error);
-  }
-  .qr-container { text-align: center; padding: 16px 0; }
-  .qr-container img { max-width: 200px; border-radius: 8px; border: 2px solid var(--border); }
-  .qr-hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
-  .message-log {
-    max-height: 200px;
-    overflow-y: auto;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 8px;
-    font-size: 12px;
-    font-family: var(--vscode-editor-font-family);
-  }
-  .message-log .entry {
-    padding: 2px 0;
-    border-bottom: 1px solid var(--border);
-    word-break: break-all;
-  }
-  .message-log .entry:last-child { border-bottom: none; }
-  .message-log .from { color: var(--vscode-textLink-foreground); }
-  .spinner {
-    display: inline-block;
-    width: 16px; height: 16px;
-    border: 2px solid var(--border);
-    border-top-color: var(--btn-bg);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  h3 { font-size: 13px; font-weight: 600; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
-  .hidden { display: none !important; }
-  .info-text { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
-  .reply-status {
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 12px; margin-bottom: 8px; border-radius: 4px;
-    background: var(--vscode-inputValidation-infoBackground);
-    border: 1px solid var(--vscode-inputValidation-infoBorder);
-    font-size: 12px;
-  }
-  .reply-status.done { background: var(--vscode-inputValidation-warningBackground, transparent); border-color: var(--success); color: var(--success); }
-  .reply-status.done .spinner { display: none; }
-</style>
-</head>
-<body>
-  <div class="section">
-    <div id="status-area">
-      <span id="status-badge" class="status-badge"><span class="dot"></span><span id="status-text">Initializing...</span></span>
-    </div>
-  </div>
-  <div id="view-idle" class="section hidden">
-    <button class="btn" onclick="send('login')">扫码登录</button>
-    <p class="info-text">点击扫描微信二维码登录</p>
-  </div>
-  <div id="view-ready" class="section hidden">
-    <button class="btn" onclick="send('connect')">连接</button>
-    <button class="btn secondary" onclick="send('login')">重新登录</button>
-    <p class="info-text">已有凭证，点击连接启动消息桥接</p>
-  </div>
-  <div id="view-qr" class="section hidden">
-    <div class="qr-container">
-      <img id="qr-img" src="" alt="QR Code" />
-      <p class="qr-hint" id="qr-hint">请用微信扫描</p>
-    </div>
-    <button class="btn secondary" onclick="send('cancelLogin')">取消</button>
-  </div>
-  <div id="view-connected" class="section hidden">
-    <div id="reply-status" class="reply-status hidden">
-      <span class="spinner"></span>
-      <span id="reply-status-text">AI is thinking...</span>
-    </div>
-    <button class="btn secondary" onclick="send('screenshot')" style="margin-bottom: 4px;">截图</button>
-    <button class="btn danger" onclick="send('disconnect')">断开连接</button>
-    <h3>最近消息</h3>
-    <div id="message-log" class="message-log">
-      <div class="entry" style="color: var(--muted)">等待消息...</div>
-    </div>
-  </div>
-  <div id="view-error" class="section hidden">
-    <p id="error-text" style="color: var(--error); margin-bottom: 8px;"></p>
-    <button class="btn" onclick="send('connect')">重试连接</button>
-    <button class="btn secondary" onclick="send('login')">重新登录</button>
-  </div>
-<script>
-  const vscode = acquireVsCodeApi();
-  const views = ['idle', 'ready', 'qr', 'connected', 'error'];
-  const messageLog = [];
-  const MAX_LOG = 50;
-  function send(command) { vscode.postMessage({ command }); }
-  function showView(name) { views.forEach(v => { document.getElementById('view-' + v).classList.toggle('hidden', v !== name); }); }
-  function setStatus(state) {
-    const badge = document.getElementById('status-badge');
-    const text = document.getElementById('status-text');
-    badge.className = 'status-badge';
-    const labels = { idle: '离线', logging_in: '扫码中...', connecting: '连接中...', connected: '已连接', error: '错误' };
-    text.textContent = labels[state] || state;
-    if (state === 'connected') badge.classList.add('connected');
-    if (state === 'error') badge.classList.add('error');
-  }
-  function addMessage(from, text) {
-    messageLog.unshift({ from, text, ts: Date.now() });
-    if (messageLog.length > MAX_LOG) messageLog.pop();
-    renderLog();
-  }
-  function renderLog() {
-    const el = document.getElementById('message-log');
-    if (messageLog.length === 0) { el.innerHTML = '<div class="entry" style="color: var(--muted)">等待消息...</div>'; return; }
-    el.innerHTML = messageLog.map(m => {
-      const short = m.from.slice(-6);
-      const t = m.text.length > 80 ? m.text.slice(0, 80) + '...' : m.text;
-      return '<div class="entry"><span class="from">' + short + '</span> ' + escHtml(t) + '</div>';
-    }).join('');
-  }
-  function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  window.addEventListener('message', e => {
-    const msg = e.data;
-    switch (msg.type) {
-      case 'stateChange':
-        setStatus(msg.state);
-        if (msg.state === 'connected') showView('connected');
-        else if (msg.state === 'logging_in') showView('qr');
-        else if (msg.state === 'connecting') { setStatus('connecting'); }
-        else if (msg.state === 'error') { showView('error'); if (msg.detail) document.getElementById('error-text').textContent = msg.detail; }
-        else if (msg.state === 'idle') { showView(msg.hasCredentials ? 'ready' : 'idle'); }
-        break;
-      case 'qrCode': document.getElementById('qr-img').src = msg.url; document.getElementById('qr-hint').textContent = '请用微信扫描'; showView('qr'); break;
-      case 'qrScanned': document.getElementById('qr-hint').textContent = '已扫描，请在手机上确认...'; break;
-      case 'loginSuccess': showView('ready'); break;
-      case 'loginError': showView('error'); document.getElementById('error-text').textContent = msg.message; break;
-      case 'incomingMessage': addMessage(msg.from, msg.text); break;
-      case 'replyPending': { const rs = document.getElementById('reply-status'); rs.classList.remove('hidden', 'done'); document.getElementById('reply-status-text').textContent = 'AI is thinking...'; break; }
-      case 'replySent': { const rs = document.getElementById('reply-status'); rs.classList.remove('hidden'); rs.classList.add('done'); const preview = msg.text.length > 60 ? msg.text.slice(0, 60) + '...' : msg.text; document.getElementById('reply-status-text').textContent = '已回复: ' + preview; setTimeout(() => { rs.classList.add('hidden'); }, 5000); break; }
-    }
-  });
-  send('getState');
-</script>
-</body>
-</html>`;
+		webviewView.webview.options = { enableScripts: true };
+		webviewView.webview.html = `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><style>
+body { font-family: var(--vscode-font-family); color: var(--vscode-sideBar-foreground); background: var(--vscode-sideBar-background); padding: 16px; }
+p { font-size: 13px; color: var(--vscode-descriptionForeground); }
+</style></head><body>
+<p>WeChat integration loading...</p>
+<p style="font-size:12px;margin-top:8px;">Engine will be enabled in next iteration.</p>
+</body></html>`;
 	}
 }
 
@@ -937,66 +678,10 @@ export function activate(ctx: vscode.ExtensionContext) {
 		)
 	);
 
-	// ── WeChat engine + webview (isolated so failures don't break MultiSession) ──
-	let wechatProvider: WeChatViewProvider | undefined;
-	let wechatStatusBar: vscode.StatusBarItem | undefined;
-
-	try {
-		wechatEngine = new ClawBotEngine();
-		wechatProvider = new WeChatViewProvider(ctx, wechatEngine);
-
-		ctx.subscriptions.push(
-			vscode.window.registerWebviewViewProvider(
-				'multiSession.wechat',
-				wechatProvider,
-			)
-		);
-
-		wechatStatusBar = vscode.window.createStatusBarItem(
-			vscode.StatusBarAlignment.Right,
-			100,
-		);
-		wechatStatusBar.command = 'multiSession.wechatStatus';
-		updateWechatStatusBar(wechatStatusBar, wechatEngine.getState());
-		wechatStatusBar.show();
-		ctx.subscriptions.push(wechatStatusBar);
-
-		wechatEngine.on('stateChange', (state) => {
-			updateWechatStatusBar(wechatStatusBar!, state);
-			wechatProvider!.postMessage({ type: 'stateChange', state });
-		});
-		wechatEngine.on('qrCode', (info) => {
-			wechatProvider!.postMessage({ type: 'qrCode', url: info.qrcodeUrl });
-		});
-		wechatEngine.on('qrScanned', () => {
-			wechatProvider!.postMessage({ type: 'qrScanned' });
-		});
-		wechatEngine.on('loginSuccess', () => {
-			vscode.window.showInformationMessage('微信登录成功！');
-			wechatProvider!.postMessage({ type: 'loginSuccess' });
-		});
-		wechatEngine.on('loginError', (err) => {
-			vscode.window.showErrorMessage(`微信登录失败: ${err.message}`);
-			wechatProvider!.postMessage({ type: 'loginError', message: err.message });
-		});
-		wechatEngine.on('message', (from, text) => {
-			wechatProvider!.postMessage({ type: 'incomingMessage', from, text });
-		});
-		wechatEngine.on('replyPending', () => {
-			wechatProvider!.postMessage({ type: 'replyPending' });
-			updateWechatStatusBar(wechatStatusBar!, 'replying');
-		});
-		wechatEngine.on('replySent', (text) => {
-			wechatProvider!.postMessage({ type: 'replySent', text });
-			updateWechatStatusBar(wechatStatusBar!, 'connected');
-		});
-		wechatEngine.on('error', (err) => {
-			wechatProvider!.postMessage({ type: 'error', message: err.message });
-		});
-	} catch (err) {
-		const errMsg = err instanceof Error ? err.message : String(err);
-		output.appendLine(`[wechat] engine init failed (MultiSession still works): ${errMsg}`);
-	}
+	// ── WeChat stub panel (engine disabled for debugging) ──
+	ctx.subscriptions.push(
+		vscode.window.registerWebviewViewProvider('multiSession.wechat', new WeChatViewProvider())
+	);
 
 	// ── commands ──
 	ctx.subscriptions.push(
@@ -1032,43 +717,12 @@ export function activate(ctx: vscode.ExtensionContext) {
 			vscode.window.showInformationMessage('通信规则已复制到剪贴板');
 		}),
 		vscode.commands.registerCommand('multiSession.wechatLogin', () => {
-			wechatEngine?.login();
+			vscode.window.showInformationMessage('WeChat engine not yet enabled');
 		}),
-		vscode.commands.registerCommand('multiSession.wechatConnect', () => {
-			wechatEngine?.connect().catch((err: Error) => {
-				vscode.window.showErrorMessage(`WeChat connect failed: ${err.message}`);
-			});
-		}),
-		vscode.commands.registerCommand('multiSession.wechatDisconnect', () => {
-			wechatEngine?.disconnect();
-			vscode.window.showInformationMessage('微信已断开连接');
-		}),
-		vscode.commands.registerCommand('multiSession.wechatStatus', () => {
-			if (!wechatEngine) return;
-			const state = wechatEngine.getState();
-			const creds = wechatEngine.getCredentials();
-			const info = creds
-				? `状态: ${state}\nBot ID: ${creds.botId}\nUser ID: ${creds.userId}`
-				: `状态: ${state}\n无存储凭证`;
-			vscode.window.showInformationMessage(info);
-		}),
-		vscode.commands.registerCommand('multiSession.wechatScreenshot', async () => {
-			if (!wechatEngine) return;
-			try {
-				const filePath = await wechatEngine.sendScreenshot();
-				wechatProvider.postMessage({ type: 'screenshot', path: filePath });
-				vscode.window.showInformationMessage('截图已发送到微信');
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				if (msg === 'Not connected') {
-					const filePath = await captureAndCleanup();
-					wechatProvider.postMessage({ type: 'screenshot', path: filePath });
-					vscode.window.showInformationMessage(`截图已保存: ${filePath}`);
-				} else {
-					vscode.window.showErrorMessage(`截图失败: ${msg}`);
-				}
-			}
-		}),
+		vscode.commands.registerCommand('multiSession.wechatConnect', () => {}),
+		vscode.commands.registerCommand('multiSession.wechatDisconnect', () => {}),
+		vscode.commands.registerCommand('multiSession.wechatStatus', () => {}),
+		vscode.commands.registerCommand('multiSession.wechatScreenshot', () => {}),
 	);
 
 	// window focus tracking
@@ -1091,36 +745,6 @@ export function activate(ctx: vscode.ExtensionContext) {
 	pollTimer = setInterval(tick, POLL_INTERVAL_MS);
 	output.appendLine('[activate] polling started');
 
-	// auto-connect WeChat if credentials exist
-	try {
-		if (wechatEngine?.hasCredentials()) {
-			wechatEngine.connect().catch(() => {});
-		}
-	} catch (err) {
-		output.appendLine(`[wechat] auto-connect check failed: ${err instanceof Error ? err.message : String(err)}`);
-	}
-}
-
-function updateWechatStatusBar(item: vscode.StatusBarItem, state: string) {
-	const icons: Record<string, string> = {
-		idle: '$(circle-outline)',
-		logging_in: '$(loading~spin)',
-		connecting: '$(loading~spin)',
-		connected: '$(check)',
-		replying: '$(loading~spin)',
-		error: '$(error)',
-	};
-	const labels: Record<string, string> = {
-		idle: 'WeChat',
-		logging_in: 'WeChat 扫码中...',
-		connecting: 'WeChat 连接中...',
-		connected: 'WeChat',
-		replying: 'WeChat 回复中...',
-		error: 'WeChat 错误',
-	};
-	const icon = icons[state] ?? '$(question)';
-	item.text = `${icon} ${labels[state] ?? 'WeChat'}`;
-	item.tooltip = `WeChat ClawBot: ${state}`;
 }
 
 export function deactivate() {
@@ -1128,7 +752,5 @@ export function deactivate() {
 		clearInterval(pollTimer);
 		pollTimer = undefined;
 	}
-	wechatEngine?.disconnect();
-	wechatEngine = undefined;
 	output?.appendLine('[deactivate] cleanup done');
 }

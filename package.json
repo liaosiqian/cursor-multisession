@@ -93,6 +93,8 @@
 		"compile:mcp": "esbuild mcp-server/index.ts --bundle --outfile=dist/mcp-server.mjs --format=esm --platform=node --minify",
 		"compile": "npm run compile:ext && npm run compile:webview && npm run compile:mcp",
 		"build": "npm run compile",
+		"deploy": "npm run build && node scripts/deploy.js",
+		"dev": "node scripts/watch.js",
 		"package": "npm run build && npx @vscode/vsce package --no-dependencies"
 	},
 	"dependencies": {
