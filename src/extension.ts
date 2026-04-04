@@ -21,15 +21,23 @@ let IS_DEV = false;
 
 // ── 通信规则提示词（粘贴到 Composer 用） ──
 
-const RULE_PROMPT = `你好，请遵循以下 MCP 工具调用规则。
+function generateComposerToken(): string {
+	return `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function generateRulePrompt(): string {
+	const token = generateComposerToken();
+	return `你好，请遵循以下 MCP 工具调用规则。
 
 # MCP 工具调用规则
+
+**本对话的 composer_token: \`${token}\`**
 
 1. 每轮对话回复**完整输出后**，最后一步必须调用 \`check_messages\`，适用于 Agent/Plan/Debug/Ask 所有模式，无一例外
 2. \`check_messages\` 会持续等待直到用户发来新消息；收到后处理并回复，然后再次调用 \`check_messages\`，形成永续循环：回复 → check_messages → 收到消息 → 回复 → check_messages
 3. 严禁在回合开始时或回复未完成时调用 \`check_messages\`；唯一豁免：用户明确要求结束对话
 4. Plan 模式写完方案后、Debug 模式分析完问题后、Ask 模式回答完问题后，均不得直接结束对话，必须调用 \`check_messages\` 等待用户反馈
-5. **模式切换/新对话恢复**：切换模式（如 Agent → Plan）或 Composer 重新打开时，如果丢失了 session_id，直接调用 \`check_messages\`（不传 session_id），服务端会自动恢复之前的会话。恢复后使用返回的 session_id 继续工作
+5. **Composer 身份标识**：首次调用 \`check_messages\` 时（不传 session_id），**必须**携带 \`composer_token: "${token}"\`。服务端通过此 token 区分不同的 Composer 对话。模式切换/重连时，如果丢失了 session_id，同样携带此 token 调用 \`check_messages\`，服务端会自动恢复对应的会话
 6. 需要用户做选择或确认时（选方案、选框架、确认操作等），必须调用 \`ask_question\`；严禁使用 Cursor 内置的 ask_user_question
 7. \`ask_question\` 参数格式: \`{ "session_id": "xxx", "questions": [{ "question": "问题文本", "options": [{ "id": "a", "label": "选项A" }, { "id": "b", "label": "选项B" }], "allow_multiple": false }] }\`
 8. 单选: \`allow_multiple: false\`；多选: \`allow_multiple: true\`；同一 \`questions\` 数组可混合单选和多选
@@ -44,6 +52,36 @@ const RULE_PROMPT = `你好，请遵循以下 MCP 工具调用规则。
 
 ---
 **回合结束（强制）**: 回复完整输出完毕后，最后一步必须调用 MultiSession MCP 的 \`check_messages\` 工具。`;
+}
+
+function generateResumeRulePrompt(sessionId: string, sessionName: string): string {
+	return `你好，请恢复之前的会话并遵循以下 MCP 工具调用规则。
+
+# 会话恢复
+
+**请立即调用 \`check_messages\` 并传入 \`session_id: "${sessionId}"\`，恢复名为「${sessionName}」的会话。**
+
+# MCP 工具调用规则
+
+1. 每轮对话回复**完整输出后**，最后一步必须调用 \`check_messages\`，适用于 Agent/Plan/Debug/Ask 所有模式，无一例外
+2. \`check_messages\` 会持续等待直到用户发来新消息；收到后处理并回复，然后再次调用 \`check_messages\`，形成永续循环：回复 → check_messages → 收到消息 → 回复 → check_messages
+3. 严禁在回合开始时或回复未完成时调用 \`check_messages\`；唯一豁免：用户明确要求结束对话
+4. Plan 模式写完方案后、Debug 模式分析完问题后、Ask 模式回答完问题后，均不得直接结束对话，必须调用 \`check_messages\` 等待用户反馈
+5. **本对话已有 session_id: \`${sessionId}\`**，此后每次调用任何 MCP 工具都必须在 arguments 中带上此 \`session_id\`。模式切换/重连时也使用此 session_id
+6. 需要用户做选择或确认时（选方案、选框架、确认操作等），必须调用 \`ask_question\`；严禁使用 Cursor 内置的 ask_user_question
+7. \`ask_question\` 参数格式: \`{ "session_id": "${sessionId}", "questions": [{ "question": "问题文本", "options": [{ "id": "a", "label": "选项A" }, { "id": "b", "label": "选项B" }], "allow_multiple": false }] }\`
+8. 单选: \`allow_multiple: false\`；多选: \`allow_multiple: true\`；同一 \`questions\` 数组可混合单选和多选
+9. 用户在每道题中均可额外输入自定义补充文本，无需为此添加额外选项
+10. \`ask_question\` 收到用户回答后，处理完毕仍需调用 \`check_messages\` 继续监听
+11. 禁止在每轮结束时用 \`ask_question\` 问"还有别的需要吗"，回合结束只用 \`check_messages\`
+12. \`check_messages\` 支持可选参数 \`reply\`（string，Markdown 格式）：传入本轮回复的摘要/结论，插件界面会弹窗展示给用户。无需总结时可省略
+13. 可以使用 subagent 执行搜索、分析等独立任务，但所有 MultiSession MCP 工具（check_messages、ask_question、export_chat）必须由主 Agent 调用，subagent 不得调用
+14. 如果 \`check_messages\` 或 \`ask_question\` 因异常返回/报错，且用户未要求结束对话，严禁输出内部错误给用户，必须立刻再次调用对应工具继续等待
+15. \`export_chat\` 用于导出当前会话的完整对话记录，仅当用户要求"导出对话"时才调用
+
+---
+**回合结束（强制）**: 回复完整输出完毕后，最后一步必须调用 MultiSession MCP 的 \`check_messages\` 工具（session_id="${sessionId}"）。`;
+}
 
 // ── Cursor Rule 文件内容（自动注入，含 subagent 限制） ──
 
@@ -62,7 +100,7 @@ alwaysApply: true
 
 1. 每轮对话回复**完整输出后**，最后一步必须调用 \`check_messages\`，适用于 Agent/Plan/Debug/Ask 所有模式，无一例外
 2. \`check_messages\` 会持续等待直到用户发来新消息；收到后处理并回复，然后再次调用 \`check_messages\`，形成永续循环
-3. **新对话 / 模式切换恢复**：若对话中尚无用户消息，或切换模式（Agent ↔ Plan ↔ Debug ↔ Ask）后丢失了 session_id，应直接调用 \`check_messages\`（不传 session_id），服务端会自动恢复之前的会话。恢复后使用返回的 session_id 继续。严禁在已有用户消息且回复未完成时调用；唯一豁免：用户明确要求结束对话
+3. **Composer 身份标识**：首次调用 \`check_messages\` 时（不传 session_id），**必须**同时传入 \`composer_token\` 参数。如果用户消息中包含 \`composer_token\` 值则直接使用；否则自行生成一个随机 token（格式 \`c-<随机8位字母数字>\`）。同一 Composer 对话中 composer_token 保持不变。服务端通过此 token 区分不同的 Composer 对话。模式切换/重连时，如果丢失了 session_id，需携带相同的 \`composer_token\` 调用 \`check_messages\`，服务端会自动恢复对应的会话
 4. Plan 模式写完方案后、Debug 模式分析完问题后、Ask 模式回答完问题后，均不得直接结束对话，必须调用 \`check_messages\` 等待用户反馈
 5. 需要用户做选择或确认时，必须调用 \`ask_question\`；严禁使用 Cursor 内置的 ask_user_question
 6. \`ask_question\` 参数格式: \`{ "session_id": "xxx", "questions": [{ "question": "问题文本", "options": [{ "id": "a", "label": "选项A" }], "allow_multiple": false }] }\`
@@ -535,7 +573,7 @@ function syncState() {
 	panel.webview.postMessage({ type: 'sessions', data: sessions });
 	panel.webview.postMessage({ type: 'mcpConfigured', data: isMcpConfigured() });
 	panel.webview.postMessage({ type: 'workspacePaths', data: getWorkspacePaths() });
-	panel.webview.postMessage({ type: 'rulePrompt', data: RULE_PROMPT });
+	panel.webview.postMessage({ type: 'rulePrompt', data: generateRulePrompt() });
 	panel.webview.postMessage({ type: 'extensionInfo', version: EXT_VERSION, isDev: IS_DEV });
 }
 
@@ -767,10 +805,20 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 					tryReconnectViaCursor();
 					break;
 
-				case 'copyRule':
-					vscode.env.clipboard.writeText(RULE_PROMPT);
-					vscode.window.showInformationMessage('通信规则已复制到剪贴板');
-					break;
+			case 'copyRule':
+				vscode.env.clipboard.writeText(generateRulePrompt());
+				vscode.window.showInformationMessage('通信规则已复制到剪贴板（含唯一 Composer 标识）');
+				break;
+
+			case 'copyResumeRule': {
+				const sessions = readJson<SessionMeta[]>(SESSIONS_FILE) || [];
+				const target = sessions.find(s => s.id === msg.sessionId);
+				const name = target?.name || msg.sessionId;
+				const ruleText = generateResumeRulePrompt(msg.sessionId, name);
+				vscode.env.clipboard.writeText(ruleText);
+				vscode.window.showInformationMessage(`会话「${name}」的恢复规则已复制到剪贴板`);
+				break;
+			}
 
 				case 'installMcp': {
 					const result = installMcpConfig(this.ctx);
@@ -933,6 +981,40 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 						return { id: h.composerId, label: name, desc: parts.join(' · ') };
 					});
 					panel?.webview.postMessage({ type: 'historyList', items: list });
+					break;
+				}
+
+				case 'requestOpenFiles': {
+					const editors = vscode.window.visibleTextEditors;
+					const tabs = vscode.window.tabGroups.all.flatMap(g => g.tabs);
+					const seen = new Set<string>();
+					const files: { path: string; name: string }[] = [];
+					for (const e of editors) {
+						const p = e.document.uri.fsPath;
+						if (!seen.has(p)) {
+							seen.add(p);
+							files.push({ path: p, name: path.basename(p) });
+						}
+					}
+					for (const tab of tabs) {
+						const uri = (tab.input as any)?.uri as vscode.Uri | undefined;
+						if (uri?.scheme === 'file' && !seen.has(uri.fsPath)) {
+							seen.add(uri.fsPath);
+							files.push({ path: uri.fsPath, name: path.basename(uri.fsPath) });
+						}
+					}
+					panel?.webview.postMessage({ type: 'openFilesList', files });
+					break;
+				}
+
+				case 'deleteMessage': {
+					const logPath = path.join(SESSIONS_DIR, msg.sessionId, 'chat-log.json');
+					const logs = readJson<any[]>(logPath) || [];
+					if (msg.msgIndex >= 0 && msg.msgIndex < logs.length) {
+						logs.splice(msg.msgIndex, 1);
+						writeJson(logPath, logs);
+						output.appendLine(`[msg] deleted index ${msg.msgIndex} from ${msg.sessionId}`);
+					}
 					break;
 				}
 			}
@@ -1434,8 +1516,8 @@ export function activate(ctx: vscode.ExtensionContext) {
 			}
 		}),
 		vscode.commands.registerCommand('multiSession.copyRule', () => {
-			vscode.env.clipboard.writeText(RULE_PROMPT);
-			vscode.window.showInformationMessage('通信规则已复制到剪贴板');
+			vscode.env.clipboard.writeText(generateRulePrompt());
+			vscode.window.showInformationMessage('通信规则已复制到剪贴板（含唯一 Composer 标识）');
 		}),
 		vscode.commands.registerCommand('multiSession.wechatLogin', () => {
 			vscode.window.showInformationMessage('请在 WeChat 面板中添加账号并扫码登录');

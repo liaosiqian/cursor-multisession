@@ -40,10 +40,17 @@ function readSummarySafe(summaryPath: string): Summary | null {
   }
 }
 
+export interface ReplyWatcherOptions {
+  isUserActive?: () => boolean;
+}
+
 /**
  * Watch summary.json for changes and auto-send AI replies to WeChat.
  * When the AI writes a reply via check_messages(reply=...), it updates
  * summary.json. This watcher detects the change and sends it to WeChat.
+ *
+ * If `options.isUserActive` is provided, replies are only sent when the
+ * function returns true (e.g. user sent a WeChat message within the last 30 min).
  */
 export function startReplyWatcher(
   sessionId: string,
@@ -51,6 +58,7 @@ export function startReplyWatcher(
   targetUserId: string,
   onReplySent?: (text: string) => void,
   sessionName?: string,
+  options?: ReplyWatcherOptions,
 ): () => void {
   const summaryPath = path.join(
     MULTISESSION_DIR,
@@ -82,6 +90,16 @@ export function startReplyWatcher(
       }
 
       lastTs = data.ts;
+
+      if (options?.isUserActive && !options.isUserActive()) {
+        logger.info(
+          { sessionId, textLen: data.text.length },
+          "reply watcher: skipping send — user not active in WeChat recently",
+        );
+        sentFingerprints.add(fp);
+        return;
+      }
+
       const ctx = loadContextToken(targetUserId);
       if (!ctx) {
         logger.warn("no context_token for reply watcher, skipping");

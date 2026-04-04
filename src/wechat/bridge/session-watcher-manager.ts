@@ -37,6 +37,7 @@ export class SessionWatcherManager {
   private sessionsWatcher: fs.FSWatcher | null = null;
   private rescanTimer: ReturnType<typeof setTimeout> | null = null;
   private onReplySent: ((ev: ReplySentEvent) => void) | null = null;
+  private isUserActive: (() => boolean) | null = null;
 
   constructor(
     private client: ClawBotClient,
@@ -45,6 +46,10 @@ export class SessionWatcherManager {
 
   setOnReplySent(cb: (ev: ReplySentEvent) => void): void {
     this.onReplySent = cb;
+  }
+
+  setIsUserActive(cb: () => boolean): void {
+    this.isUserActive = cb;
   }
 
   start(): void {
@@ -151,6 +156,7 @@ export class SessionWatcherManager {
           this.onReplySent?.({ sessionId, sessionName: currentName, text });
         },
         sessionName,
+        { isUserActive: this.isUserActive ? () => this.isUserActive!() : undefined },
       );
 
       const inquiryHandle = startInquiryWatcher(

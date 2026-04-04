@@ -197,9 +197,24 @@ function App() {
 				setAcIndex(0);
 				break;
 			case 'historyList':
-				setAcItems((msg.items || []).map((h: any) => ({ id: h.id, label: h.label || h.name || h.id, desc: h.desc || '' })));
+				setAcItems(prev => {
+					const files = prev.filter(i => i.id.startsWith('file:'));
+					const histItems = (msg.items || []).map((h: any) => ({ id: h.id, label: h.label || h.name || h.id, desc: h.desc || '', group: 'history' }));
+					return [...files, ...histItems];
+				});
 				setAcMode('history');
 				setAcIndex(0);
+				break;
+			case 'openFilesList':
+				setAcItems(prev => {
+					const nonFiles = prev.filter(i => !i.id.startsWith('file:'));
+					const fileItems = (msg.files || []).map((f: any) => ({ id: `file:${f.path}`, label: f.name, desc: f.path, group: 'file' }));
+					return [...fileItems, ...nonFiles];
+				});
+				if (acMode !== 'history') {
+					setAcMode('history');
+					setAcIndex(0);
+				}
 				break;
 			case 'extensionInfo':
 				if (msg.version) setExtVersion(msg.version);
@@ -263,6 +278,16 @@ function App() {
 		e.target.value = '';
 	}, [addImageFromFile]);
 
+	const handleDeleteMessage = useCallback((msgIndex: number) => {
+		const sid = activeSessionId || 'default';
+		vscode.postMessage({ type: 'deleteMessage', sessionId: sid, msgIndex });
+		setLogsMap(prev => {
+			const logs = [...(prev[sid] || [])];
+			logs.splice(msgIndex, 1);
+			return { ...prev, [sid]: logs };
+		});
+	}, [activeSessionId]);
+
 	const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
 		const val = e.target.value;
 		setInputText(val);
@@ -270,6 +295,7 @@ function App() {
 			vscode.postMessage({ type: 'requestSkills' });
 		} else if (val === '@') {
 			vscode.postMessage({ type: 'requestHistory' });
+			vscode.postMessage({ type: 'requestOpenFiles' });
 		} else if (!val.startsWith('/') && !val.startsWith('@')) {
 			setAcMode(null);
 			setAcItems([]);
@@ -295,15 +321,16 @@ function App() {
 	const selectAcItem = useCallback((item: { id: string; label: string }) => {
 		if (acMode === 'skill') {
 			setSharedFiles(prev => [...prev, { path: `@skill:${item.label}`, name: `skill: ${item.label}` }]);
-			setInputText('');
-			setTimeout(() => textareaRef.current?.focus(), 50);
+		} else if (item.id.startsWith('file:')) {
+			const filePath = item.id.slice(5);
+			setSharedFiles(prev => [...prev, { path: filePath, name: item.label }]);
 		} else if (acMode === 'history') {
 			setSharedFiles(prev => [...prev, { path: `@history:${item.id}`, name: `chat: ${item.label}` }]);
-			setInputText('');
-			setTimeout(() => textareaRef.current?.focus(), 50);
 		}
+		setInputText('');
 		setAcMode(null);
 		setAcItems([]);
+		setTimeout(() => textareaRef.current?.focus(), 50);
 	}, [acMode]);
 
 	const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -355,6 +382,10 @@ function App() {
 			setActiveSessionId(remaining.length > 0 ? remaining[0].id : '');
 		}
 	}, [activeSessionId, sessions]);
+
+	const handleCopyResumeRule = useCallback((sid: string) => {
+		vscode.postMessage({ type: 'copyResumeRule', sessionId: sid });
+	}, []);
 
 	const [summaryCollapsed, setSummaryCollapsed] = useState(false);
 	const [editingPendingId, setEditingPendingId] = useState<string | null>(null);
@@ -521,16 +552,23 @@ function App() {
 						) : (
 							<span className="tab-name">{s.name}</span>
 						)}
-						{(pendingMap[s.id]?.length || 0) > 0 && (
-							<span className="tab-badge">{pendingMap[s.id].length}</span>
-						)}
-						<button
-							className="tab-close"
-							onClick={(e) => { e.stopPropagation(); handleCloseSession(s.id); }}
-							title="关闭会话"
-						>
-							×
-						</button>
+					{(pendingMap[s.id]?.length || 0) > 0 && (
+						<span className="tab-badge">{pendingMap[s.id].length}</span>
+					)}
+					<button
+						className="tab-action"
+						onClick={(e) => { e.stopPropagation(); handleCopyResumeRule(s.id); }}
+						title="复制恢复规则（粘贴到新 Composer 恢复此会话）"
+					>
+						↻
+					</button>
+					<button
+						className="tab-close"
+						onClick={(e) => { e.stopPropagation(); handleCloseSession(s.id); }}
+						title="关闭会话"
+					>
+						×
+					</button>
 					</div>
 				))}
 			</div>
@@ -563,30 +601,51 @@ function App() {
 
 			{/* Message Log */}
 			<div className="message-log" ref={messageLogRef}>
-				{aliveSessions.length === 0 && (
-					<div className="empty-state">
-						<p>暂无活跃会话</p>
-						<p className="hint">在 Composer 中粘贴通信规则并发送消息以创建会话</p>
-						<button className="btn-primary" onClick={handleCopyRule}>复制通信规则</button>
+			{aliveSessions.length === 0 && (
+				<div className="empty-state">
+					<div className="onboarding-icon">⟐</div>
+					<div className="onboarding-title">MultiSession</div>
+					<div className="onboarding-subtitle">等待 AI 连接 <span className="dot-pulse" /></div>
+					<div className="onboarding-steps">
+						<div className="step"><span className="step-num">1</span><span>在 Cursor 设置中启用 MultiSession MCP</span></div>
+						<div className="step"><span className="step-num">2</span><span>点击下方「复制规则」按钮复制通信规则</span></div>
+						<div className="step"><span className="step-num">3</span><span>在 Cursor 聊天窗口粘贴规则并发送</span></div>
+						<div className="step"><span className="step-num">4</span><span>Cursor 发完消息后此插件会展示会话 Tab</span></div>
+						<div className="step"><span className="step-num">5</span><span>会话 Tab 可双击或右击编辑标题，点击关闭按钮可删除会话</span></div>
 					</div>
-				)}
-			{currentLogs.map((msg, i) => (
-				<div key={i} className={`message message-${msg.role}`}>
+					<div className="onboarding-actions">
+						{!mcpConfigured && (
+							<button className="btn-primary btn-onboard" onClick={() => vscode.postMessage({ type: 'installMcp' })}>
+								一键安装 MCP
+							</button>
+						)}
+						<button className="btn-primary btn-onboard" onClick={handleCopyRule}>
+							复制规则
+						</button>
+					</div>
+					<p className="onboarding-hint">请参考下方「使用教程」了解更多</p>
+				</div>
+			)}
+		{currentLogs.map((msg, i) => (
+			<div key={i} className={`message message-${msg.role}`}>
+				<div className="message-header">
 					<div className="message-role">{msg.role === 'user' ? '你' : msg.role === 'system' ? '系统' : 'AI'}</div>
-						<div className="message-text">
-							{msg.text.split(/(\[image: [^\]]+\])/).map((part, pi) => {
-								const imgMatch = part.match(/^\[image: (.+)\]$/);
-								if (imgMatch) {
-									return <span key={pi} className="msg-image-ref" title={imgMatch[1]}>📷 图片</span>;
-								}
-								return <span key={pi}>{part}</span>;
-							})}
-						</div>
-						<div className="message-time">
-							{new Date(msg.ts).toLocaleTimeString()}
-						</div>
-					</div>
-				))}
+					<button className="msg-delete" onClick={() => handleDeleteMessage(i)} title="删除此消息">×</button>
+				</div>
+				<div className="message-text">
+					{msg.text.split(/(\[image: [^\]]+\])/).map((part, pi) => {
+						const imgMatch = part.match(/^\[image: (.+)\]$/);
+						if (imgMatch) {
+							return <span key={pi} className="msg-image-ref" title={imgMatch[1]}>📷 图片</span>;
+						}
+						return <span key={pi}>{part}</span>;
+					})}
+				</div>
+				<div className="message-time">
+					{new Date(msg.ts).toLocaleTimeString()}
+				</div>
+			</div>
+		))}
 				{currentPending.length > 0 && (
 					<div className="pending-section">
 						<div className="pending-label">待处理 ({currentPending.length})</div>
@@ -748,22 +807,54 @@ function App() {
 					</button>
 				</div>
 				<div className="input-wrapper">
-					{acMode && filteredAcItems.length > 0 && (
-						<div className="ac-popup">
-							<div className="ac-title">{acMode === 'skill' ? 'Skills' : 'History'}</div>
-							{filteredAcItems.map((item, i) => (
-								<div
-									key={item.id}
-									className={`ac-item${i === acIndex ? ' active' : ''}`}
-									onMouseDown={(e) => { e.preventDefault(); selectAcItem(item); }}
-									onMouseEnter={() => setAcIndex(i)}
-								>
-									<span className="ac-label">{item.label}</span>
-									{item.desc && <span className="ac-desc">{item.desc}</span>}
-								</div>
-							))}
-						</div>
-					)}
+				{acMode && filteredAcItems.length > 0 && (
+					<div className="ac-popup">
+						{acMode === 'skill' && <div className="ac-title">Skills</div>}
+						{acMode === 'history' && (() => {
+							const files = filteredAcItems.filter((i: any) => i.id.startsWith('file:'));
+							const chats = filteredAcItems.filter((i: any) => !i.id.startsWith('file:'));
+							let globalIdx = -1;
+							return <>
+								{files.length > 0 && <>
+									<div className="ac-title">Open Files</div>
+									{files.map(item => {
+										globalIdx++;
+										const idx = globalIdx;
+										return <div key={item.id} className={`ac-item${idx === acIndex ? ' active' : ''}`}
+											onMouseDown={e => { e.preventDefault(); selectAcItem(item); }}
+											onMouseEnter={() => setAcIndex(idx)}>
+											<span className="ac-icon">📄</span>
+											<span className="ac-label">{item.label}</span>
+											{item.desc && <span className="ac-desc">{item.desc}</span>}
+										</div>;
+									})}
+								</>}
+								{chats.length > 0 && <>
+									<div className="ac-title">Past Chats</div>
+									{chats.map(item => {
+										globalIdx++;
+										const idx = globalIdx;
+										return <div key={item.id} className={`ac-item${idx === acIndex ? ' active' : ''}`}
+											onMouseDown={e => { e.preventDefault(); selectAcItem(item); }}
+											onMouseEnter={() => setAcIndex(idx)}>
+											<span className="ac-icon">💬</span>
+											<span className="ac-label">{item.label}</span>
+											{item.desc && <span className="ac-desc">{item.desc}</span>}
+										</div>;
+									})}
+								</>}
+							</>;
+						})()}
+						{acMode === 'skill' && filteredAcItems.map((item, i) => (
+							<div key={item.id} className={`ac-item${i === acIndex ? ' active' : ''}`}
+								onMouseDown={e => { e.preventDefault(); selectAcItem(item); }}
+								onMouseEnter={() => setAcIndex(i)}>
+								<span className="ac-label">{item.label}</span>
+								{item.desc && <span className="ac-desc">{item.desc}</span>}
+							</div>
+						))}
+					</div>
+				)}
 					<textarea
 						ref={textareaRef}
 						className="input-textarea"

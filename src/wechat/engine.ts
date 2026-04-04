@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { loadConfig, ILINK_BASE_URL } from './config/index';
 import { ClawBotClient } from './api/client';
 import { MessagePoller } from './poller/index';
@@ -43,6 +46,8 @@ export interface EngineEvents {
   error: [err: Error];
 }
 
+const WECHAT_ACTION_DIR = path.join(os.homedir(), '.multisession', 'wechat-actions');
+
 export class ClawBotEngine extends EventEmitter<EngineEvents> {
   private state: EngineState = "idle";
   private client: ClawBotClient | null = null;
@@ -58,6 +63,8 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
   private pendingReply = false;
   private accountId?: string;
   private skipServer: boolean;
+  private actionWatcher: fs.FSWatcher | null = null;
+  private actionProcessing = false;
 
   constructor(accountId?: string, options?: { skipServer?: boolean }) {
     super();
@@ -187,8 +194,14 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
           this.cancelTypingToUser();
           this.emit("replySent", ev.text);
         });
+        const ACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+        this.watcherManager.setIsUserActive(() => {
+          return this.lastMessageAt !== null && (Date.now() - this.lastMessageAt) < ACTIVITY_TIMEOUT_MS;
+        });
         this.watcherManager.start();
       }
+
+      this.startActionWatcher(stored.userId);
 
       this.poller.on("message", async (msg) => {
         try {
@@ -328,6 +341,8 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
   }
 
   disconnect(): void {
+    this.actionWatcher?.close();
+    this.actionWatcher = null;
     this.watcherManager?.stop();
     this.watcherManager = null;
     this.router = null;
@@ -381,6 +396,108 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
     } catch {
       // best effort
     }
+  }
+
+  private startActionWatcher(targetUserId: string): void {
+    if (!fs.existsSync(WECHAT_ACTION_DIR)) {
+      fs.mkdirSync(WECHAT_ACTION_DIR, { recursive: true });
+    }
+
+    const processAll = async () => {
+      if (this.actionProcessing) return;
+      this.actionProcessing = true;
+      try {
+        const files = fs.readdirSync(WECHAT_ACTION_DIR).filter(f => f.endsWith('.json'));
+        for (const file of files) {
+          const fp = path.join(WECHAT_ACTION_DIR, file);
+          try {
+            const raw = fs.readFileSync(fp, 'utf-8');
+            const action = JSON.parse(raw);
+            if (action.status !== 'pending') continue;
+            await this.processAction(action, targetUserId, fp);
+          } catch (err) {
+            logger.warn({ file, err: String(err) }, "action processing error");
+          }
+        }
+      } catch { /* dir read error */ }
+      this.actionProcessing = false;
+    };
+
+    try {
+      this.actionWatcher = fs.watch(WECHAT_ACTION_DIR, () => {
+        void processAll();
+      });
+    } catch (err) {
+      logger.warn({ err: String(err) }, "action watcher: fs.watch failed");
+    }
+
+    void processAll();
+    logger.info("wechat action watcher started");
+  }
+
+  private async processAction(action: any, targetUserId: string, filePath: string): Promise<void> {
+    if (!this.client || !this.media) {
+      this.writeActionResult(filePath, 'error', '微信 Bot 未连接');
+      return;
+    }
+
+    const ctx = loadContextToken(targetUserId);
+
+    try {
+      switch (action.action) {
+        case 'screenshot': {
+          const screenshotPath = await captureAndCleanup();
+          const upload = await this.media.upload(screenshotPath, targetUserId, UploadMediaType.IMAGE);
+          const imageItem = this.media.buildImageItem(upload);
+          await this.client.sendMediaItem(targetUserId, imageItem, ctx);
+          if (action.content) {
+            await this.client.sendText(targetUserId, action.content, ctx);
+          }
+          this.writeActionResult(filePath, 'done', '截图已发送到微信');
+          logger.info({ actionId: action.id }, "wechat action: screenshot sent");
+          break;
+        }
+        case 'image': {
+          const upload = await this.media.upload(action.content, targetUserId, UploadMediaType.IMAGE);
+          const imageItem = this.media.buildImageItem(upload);
+          await this.client.sendMediaItem(targetUserId, imageItem, ctx);
+          this.writeActionResult(filePath, 'done', `图片已发送: ${path.basename(action.content)}`);
+          logger.info({ actionId: action.id, file: action.content }, "wechat action: image sent");
+          break;
+        }
+        case 'file': {
+          const upload = await this.media.upload(action.content, targetUserId, UploadMediaType.FILE);
+          const fileItem = this.media.buildFileItem(upload, path.basename(action.content));
+          await this.client.sendMediaItem(targetUserId, fileItem, ctx);
+          this.writeActionResult(filePath, 'done', `文件已发送: ${path.basename(action.content)}`);
+          logger.info({ actionId: action.id, file: action.content }, "wechat action: file sent");
+          break;
+        }
+        case 'text': {
+          await this.client.sendText(targetUserId, action.content, ctx);
+          this.writeActionResult(filePath, 'done', '文本消息已发送');
+          logger.info({ actionId: action.id }, "wechat action: text sent");
+          break;
+        }
+        default:
+          this.writeActionResult(filePath, 'error', `未知 action 类型: ${action.action}`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.writeActionResult(filePath, 'error', msg);
+      logger.error({ actionId: action.id, err: msg }, "wechat action failed");
+    }
+  }
+
+  private writeActionResult(filePath: string, status: string, message: string): void {
+    try {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const data = JSON.parse(raw);
+      data.status = status;
+      data.message = message;
+      data.completedAt = Date.now();
+      fs.writeFileSync(filePath, JSON.stringify(data, null, '\t'), 'utf-8');
+    } catch { /* best effort */ }
   }
 
   async cancelTypingToUser(userId?: string): Promise<void> {

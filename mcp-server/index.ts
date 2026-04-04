@@ -53,6 +53,7 @@ interface SessionMeta {
 	name: string;
 	workspace: string;
 	windowToken?: string;
+	composerToken?: string;
 	alive: boolean;
 	createdAt: number;
 	lastActiveAt: number;
@@ -93,11 +94,25 @@ function getActiveWindowToken(workspace: string): string | null {
 
 // ── orphan / session recovery ──
 
-function tryAdoptOrphan(workspace: string, windowToken: string | null): string | null {
+function tryAdoptOrphan(workspace: string, windowToken: string | null, composerToken: string | null): string | null {
 	const sessions = readSessions();
 	const now = Date.now();
 	const wsSessions = sessions.filter(s => s.alive && s.workspace === workspace);
 	if (wsSessions.length === 0) return null;
+
+	// Phase 0: exact composerToken match — this is the same Composer reconnecting (mode switch / resume)
+	if (composerToken) {
+		const composerMatch = wsSessions.find(s => s.composerToken === composerToken);
+		if (composerMatch) {
+			log(`[adopt] recovered session ${composerMatch.id} (composerToken match, age=${now - composerMatch.lastActiveAt}ms)`);
+			return composerMatch.id;
+		}
+		// composerToken provided but no match → this is a NEW Composer, don't adopt anything
+		log(`[adopt] new composerToken ${composerToken}, skipping adoption`);
+		return null;
+	}
+
+	// Below: legacy path when composerToken is not provided (backward compat)
 
 	// Phase 1: exact windowToken match (handles mode-switch / reconnect — no time threshold)
 	if (windowToken) {
@@ -180,19 +195,30 @@ server.tool(
 	{
 		session_id: z.string().optional().describe('会话 ID。首次调用不传，后续必须携带。'),
 		reply: z.string().optional().describe('本轮回复的摘要/结论（Markdown），会在插件界面弹窗展示给用户。无需总结时可省略。'),
+		composer_token: z.string().optional().describe('Composer 标识。从通信规则中获取，用于区分不同的 Composer 对话。首次调用时携带，后续可省略。'),
 	},
 	async (args, extra) => {
 		const cwd = process.cwd();
 		const windowToken = getActiveWindowToken(cwd);
 		let sid = args.session_id as string | undefined;
 		const reply = args.reply as string | undefined;
+		const composerToken = args.composer_token as string | undefined;
 
 		// first call: try adopt or register
 		let isRecovered = false;
 		if (!sid) {
-			sid = tryAdoptOrphan(cwd, windowToken) ?? undefined;
+			sid = tryAdoptOrphan(cwd, windowToken, composerToken || null) ?? undefined;
 			if (sid) {
 				isRecovered = true;
+				// update composerToken on the recovered session if provided
+				if (composerToken) {
+					const sessions = readSessions();
+					const s = sessions.find(x => x.id === sid);
+					if (s && s.composerToken !== composerToken) {
+						s.composerToken = composerToken;
+						writeSessions(sessions);
+					}
+				}
 			} else {
 				sid = genId();
 				const sessions = readSessions();
@@ -203,6 +229,7 @@ server.tool(
 					name: `${wsName} #${num}`,
 					workspace: cwd,
 					windowToken: windowToken || undefined,
+					composerToken: composerToken || undefined,
 					alive: true,
 					createdAt: Date.now(),
 					lastActiveAt: Date.now(),
@@ -210,7 +237,7 @@ server.tool(
 				sessions.push(meta);
 				writeSessions(sessions);
 				ensureDir(getSessionDir(sid));
-				log(`[register] new session ${sid} for ${cwd}`);
+				log(`[register] new session ${sid} for ${cwd}${composerToken ? ` (composer=${composerToken})` : ''}`);
 			}
 			migrateDefaultQueue(sid);
 			cleanupExpiredSessions();
@@ -387,9 +414,10 @@ server.tool(
 
 server.tool(
 	'export_chat',
-	'导出当前会话的完整对话记录。仅当用户要求"导出对话"时才调用。',
+	'导出当前会话的完整对话记录为 Markdown 格式。包含用户消息和 AI 回复摘要，按时间顺序排列，一问一答清晰展示。',
 	{
-		session_id: z.string().describe('会话 ID，必须携带。'),
+		session_id: z.string().describe('从 check_messages 获取的会话 ID'),
+		save_to_file: z.boolean().optional().describe('是否保存到文件。true 则保存为 .md 文件并返回路径，false 则直接返回内容'),
 	},
 	async (args) => {
 		const sid = args.session_id;
@@ -408,10 +436,211 @@ server.tool(
 			return `### ${role} (${time})\n\n${m.text}`;
 		});
 
+		const content = `# 对话记录导出\n\n${lines.join('\n\n---\n\n')}`;
+
+		if (args.save_to_file) {
+			const exportPath = path.join(getSessionDir(sid), `export-${Date.now()}.md`);
+			fs.writeFileSync(exportPath, content, 'utf-8');
+			log(`[export] saved to ${exportPath}`);
+			return {
+				content: [{
+					type: 'text' as const,
+					text: `[session_id: ${sid}]\n\n对话记录已导出到: ${exportPath}`,
+				}],
+			};
+		}
+
 		return {
 			content: [{
 				type: 'text' as const,
-				text: `[session_id: ${sid}]\n\n# 对话记录导出\n\n${lines.join('\n\n---\n\n')}`,
+				text: `[session_id: ${sid}]\n\n${content}`,
+			}],
+		};
+	}
+);
+
+// ── rename_session tool ──
+
+server.tool(
+	'rename_session',
+	'为当前会话设置一个有意义的名称，该名称会显示在侧边栏的 Tab 标签上。应在了解用户任务后主动调用。',
+	{
+		session_id: z.string().describe('从 check_messages 获取的会话 ID'),
+		name: z.string().describe('会话名称，如"React 重构"、"API 开发"、"Bug 修复"等'),
+	},
+	async (args) => {
+		const sid = args.session_id;
+		const name = args.name?.trim();
+		if (!sid || !name) {
+			return { content: [{ type: 'text' as const, text: '错误：缺少 session_id 或 name' }] };
+		}
+		const sessions = readSessions();
+		const s = sessions.find(x => x.id === sid);
+		if (s) {
+			s.name = name;
+			writeSessions(sessions);
+			log(`[rename] ${sid} -> "${name}"`);
+		}
+		return {
+			content: [{
+				type: 'text' as const,
+				text: `[session_id: ${sid}]\n\n会话已重命名为「${name}」`,
+			}],
+		};
+	}
+);
+
+// ── show_progress tool ──
+
+server.tool(
+	'show_progress',
+	'在侧边栏显示任务进度。用于长时间运行的多步骤任务，让用户了解当前进展。',
+	{
+		session_id: z.string().describe('从 check_messages 获取的会话 ID'),
+		percent: z.number().min(0).max(100).describe('进度百分比 0-100'),
+		message: z.string().describe('进度描述，如"正在处理第 3/10 个文件"'),
+		done: z.boolean().optional().describe('是否已完成，完成后进度条自动消失'),
+	},
+	async (args) => {
+		const sid = args.session_id;
+		if (!sid) {
+			return { content: [{ type: 'text' as const, text: '错误：缺少 session_id' }] };
+		}
+		const progressPath = path.join(getSessionDir(sid), 'progress.json');
+		writeJson(progressPath, {
+			percent: args.percent,
+			message: args.message,
+			done: args.done || false,
+			ts: Date.now(),
+		});
+		log(`[progress] ${sid}: ${args.percent}% - ${args.message}`);
+		return {
+			content: [{
+				type: 'text' as const,
+				text: `[session_id: ${sid}]\n\n进度已更新: ${args.percent}% - ${args.message}`,
+			}],
+		};
+	}
+);
+
+// ── send_file tool ──
+
+server.tool(
+	'send_file',
+	'将一个文件推送到侧边栏供用户查看或下载。适用于 AI 生成的文件需要用户确认的场景。',
+	{
+		session_id: z.string().describe('从 check_messages 获取的会话 ID'),
+		path: z.string().describe('要发送的文件绝对路径'),
+		description: z.string().optional().describe('文件说明'),
+	},
+	async (args) => {
+		const sid = args.session_id;
+		const filePath = args.path;
+		if (!sid || !filePath) {
+			return { content: [{ type: 'text' as const, text: '错误：缺少 session_id 或 path' }] };
+		}
+		if (!fs.existsSync(filePath)) {
+			return { content: [{ type: 'text' as const, text: `[session_id: ${sid}]\n\n文件不存在: ${filePath}` }] };
+		}
+		const filesDir = path.join(getSessionDir(sid), 'shared-files');
+		ensureDir(filesDir);
+		const manifestPath = path.join(filesDir, 'manifest.json');
+		const manifest = readJson<any[]>(manifestPath) || [];
+		manifest.push({
+			id: genId(),
+			path: filePath,
+			name: path.basename(filePath),
+			description: args.description || '',
+			ts: Date.now(),
+		});
+		writeJson(manifestPath, manifest);
+		log(`[send_file] ${sid}: ${filePath}`);
+		return {
+			content: [{
+				type: 'text' as const,
+				text: `[session_id: ${sid}]\n\n文件已发送到侧边栏: ${path.basename(filePath)}${args.description ? ` - ${args.description}` : ''}`,
+			}],
+		};
+	}
+);
+
+// ── wechat_send tool ──
+
+const WECHAT_ACTION_DIR = path.join(DATA_ROOT, 'wechat-actions');
+
+server.tool(
+	'wechat_send',
+	'通过微信 Bot 向用户发送内容。支持截图、图片、文件、文本消息。截图会自动捕获当前屏幕。仅在微信 Bot 已连接时有效。',
+	{
+		session_id: z.string().describe('从 check_messages 获取的会话 ID'),
+		action: z.enum(['screenshot', 'image', 'file', 'text']).describe(
+			'发送类型：screenshot=截取当前屏幕并发送，image=发送指定图片文件，file=发送指定文件，text=发送文本消息'
+		),
+		content: z.string().optional().describe(
+			'内容：screenshot 时为可选说明文字，image/file 时为文件绝对路径，text 时为消息文本'
+		),
+	},
+	async (args) => {
+		const sid = args.session_id;
+		if (!sid) {
+			return { content: [{ type: 'text' as const, text: '错误：缺少 session_id' }] };
+		}
+
+		if ((args.action === 'image' || args.action === 'file') && !args.content) {
+			return { content: [{ type: 'text' as const, text: `[session_id: ${sid}]\n\n错误：${args.action} 类型需要提供文件路径（content 参数）` }] };
+		}
+
+		if (args.action === 'text' && !args.content) {
+			return { content: [{ type: 'text' as const, text: `[session_id: ${sid}]\n\n错误：text 类型需要提供消息文本（content 参数）` }] };
+		}
+
+		if ((args.action === 'image' || args.action === 'file') && args.content && !fs.existsSync(args.content)) {
+			return { content: [{ type: 'text' as const, text: `[session_id: ${sid}]\n\n错误：文件不存在: ${args.content}` }] };
+		}
+
+		ensureDir(WECHAT_ACTION_DIR);
+		const actionId = genId();
+		const actionFile = path.join(WECHAT_ACTION_DIR, `${actionId}.json`);
+		writeJson(actionFile, {
+			id: actionId,
+			sessionId: sid,
+			action: args.action,
+			content: args.content || '',
+			status: 'pending',
+			ts: Date.now(),
+		});
+
+		log(`[wechat_send] ${sid}: action=${args.action} id=${actionId}`);
+
+		// poll for completion (max 30s)
+		const deadline = Date.now() + 30_000;
+		while (Date.now() < deadline) {
+			const result = readJson<any>(actionFile);
+			if (result?.status === 'done') {
+				try { fs.unlinkSync(actionFile); } catch { /* */ }
+				return {
+					content: [{
+						type: 'text' as const,
+						text: `[session_id: ${sid}]\n\n${result.message || '已发送到微信'}`,
+					}],
+				};
+			}
+			if (result?.status === 'error') {
+				try { fs.unlinkSync(actionFile); } catch { /* */ }
+				return {
+					content: [{
+						type: 'text' as const,
+						text: `[session_id: ${sid}]\n\n发送失败: ${result.message || '未知错误'}`,
+					}],
+				};
+			}
+			await new Promise(r => setTimeout(r, 500));
+		}
+
+		return {
+			content: [{
+				type: 'text' as const,
+				text: `[session_id: ${sid}]\n\n微信发送请求已提交（id: ${actionId}），但等待执行超时。可能微信 Bot 未连接。`,
 			}],
 		};
 	}
