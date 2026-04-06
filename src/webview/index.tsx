@@ -502,12 +502,12 @@ function App() {
 					<span className="topbar-title">MultiSession</span>
 				</div>
 				<div className="topbar-right">
-					<button className="btn-small" onClick={handleCopyRule} title="复制通信规则">
-						规则
-					</button>
-					<button className="btn-small btn-accent" onClick={handleReconnect} title="重连 Composer">
-						重连
-					</button>
+				<button className="btn-small" onClick={handleCopyRule} data-tooltip="复制通信规则到剪贴板（粘贴到新 Composer 启动会话）" data-tooltip-pos="left">
+					规则
+				</button>
+				<button className="btn-small btn-accent" onClick={handleReconnect} data-tooltip="重连 Composer（断开时使用）" data-tooltip-pos="left">
+					重连
+				</button>
 					{totalPending > 0 && (
 						<span className="badge">{totalPending}</span>
 					)}
@@ -533,7 +533,8 @@ function App() {
 						className={`session-tab ${s.id === activeSessionId ? 'active' : ''}`}
 						onClick={() => setActiveSessionId(s.id)}
 						onDoubleClick={(e) => { e.stopPropagation(); handleStartRename(s.id, s.name); }}
-						title="双击重命名"
+						data-tooltip="双击重命名"
+						data-tooltip-pos="below"
 					>
 						{renamingSessionId === s.id ? (
 							<input
@@ -558,14 +559,16 @@ function App() {
 					<button
 						className="tab-action"
 						onClick={(e) => { e.stopPropagation(); handleCopyResumeRule(s.id); }}
-						title="复制恢复规则（粘贴到新 Composer 恢复此会话）"
+						data-tooltip="复制恢复规则（粘贴到新 Composer 恢复此会话）"
+						data-tooltip-pos="below"
 					>
 						↻
 					</button>
 					<button
 						className="tab-close"
 						onClick={(e) => { e.stopPropagation(); handleCloseSession(s.id); }}
-						title="关闭会话"
+						data-tooltip="关闭会话"
+						data-tooltip-pos="below"
 					>
 						×
 					</button>

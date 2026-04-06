@@ -377,16 +377,15 @@ server.tool(
 		writeJson(inquiryPath, { id: inquiryId, questions, ts: Date.now(), answered: false });
 		log(`[inquiry] ${sid} question posted: ${inquiryId}`);
 
-		// poll for answer
+		// poll for answer (also watch queue for new messages that override inquiry)
 		const deadline = Date.now() + MAX_POLL_DURATION_MS;
+		const queuePath = path.join(getSessionDir(sid), 'queue.json');
 		while (Date.now() < deadline) {
 			const inquiry = readJson<any>(inquiryPath);
 			if (inquiry?.answered && inquiry.id === inquiryId) {
-				// clear inquiry file
 				writeJson(inquiryPath, null);
 				touchSession(sid);
 
-				// append to chat-log
 				const logPath = path.join(getSessionDir(sid), 'chat-log.json');
 				const logs = readJson<any[]>(logPath) || [];
 				logs.push({ role: 'inquiry', text: JSON.stringify(questions), ts: inquiry.ts });
@@ -400,6 +399,28 @@ server.tool(
 					}],
 				};
 			}
+
+			// if user sent a new message while inquiry is pending, auto-skip the inquiry
+			const queue = readJson<any[]>(queuePath);
+			if (queue && queue.length > 0) {
+				writeJson(inquiryPath, null);
+				touchSession(sid);
+				log(`[inquiry] ${sid} auto-skipped: user sent new message while inquiry pending`);
+
+				const logPath = path.join(getSessionDir(sid), 'chat-log.json');
+				const logs = readJson<any[]>(logPath) || [];
+				logs.push({ role: 'inquiry', text: JSON.stringify(questions), ts: Date.now() });
+				logs.push({ role: 'system', text: '（用户跳过了问题，发送了新消息）', ts: Date.now() });
+				writeJson(logPath, logs);
+
+				return {
+					content: [{
+						type: 'text' as const,
+						text: `[session_id: ${sid}]\n\n用户没有回答问题，而是发送了新消息。请调用 check_messages 获取用户的新消息。${ENFORCE_SUFFIX(sid)}`,
+					}],
+				};
+			}
+
 			touchSession(sid);
 			await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
 		}
