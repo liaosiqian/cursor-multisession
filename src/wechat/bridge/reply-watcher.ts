@@ -95,6 +95,16 @@ export function startReplyWatcher(
 
       lastTs = data.ts;
 
+      const trimmed = data.text.trim();
+      if (trimmed.length < 6 || /^(继续监听|继续等待|等待中|轮询中|polling|waiting|listening)/i.test(trimmed)) {
+        logger.info(
+          { sessionId, text: trimmed },
+          "reply watcher: skipping trivial poll-reconnect summary",
+        );
+        sentFingerprints.add(fp);
+        return;
+      }
+
       if (options?.isUserActive && !options.isUserActive()) {
         logger.info(
           { sessionId, textLen: data.text.length },

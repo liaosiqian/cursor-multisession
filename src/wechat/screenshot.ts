@@ -13,13 +13,31 @@ function screenshotDir(): string {
   return dir;
 }
 
+async function getCursorWindowId(): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync(
+      `osascript -e 'tell application "System Events" to tell process "Cursor" to set wid to id of front window' -e 'return wid'`
+    );
+    const wid = stdout.trim();
+    if (wid && /^\d+$/.test(wid)) return wid;
+  } catch { /* Cursor may not be running or no window */ }
+  return null;
+}
+
 async function captureRaw(): Promise<string> {
   const filename = `screenshot_${Date.now()}.png`;
   const filePath = path.join(screenshotDir(), filename);
   const platform = os.platform();
 
   if (platform === "darwin") {
-    await execAsync(`screencapture -x "${filePath}"`);
+    const wid = await getCursorWindowId();
+    if (wid) {
+      await execAsync(`screencapture -x -l ${wid} "${filePath}"`);
+      logger.info({ windowId: wid }, "captured Cursor window");
+    } else {
+      await execAsync(`screencapture -x "${filePath}"`);
+      logger.info("captured full screen (Cursor window not found)");
+    }
   } else if (platform === "win32") {
     const ps = `
       Add-Type -AssemblyName System.Windows.Forms
