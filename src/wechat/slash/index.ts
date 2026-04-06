@@ -22,12 +22,14 @@ export interface SlashContext {
   onBoundSessionChanged?: (sessionId: string | null) => void;
 }
 
+type SlashReply = string | { parts: string[] };
+
 type SlashHandler = (
   args: string,
   ctx: SlashContext,
   client: ClawBotClient,
   userId: string,
-) => Promise<string>;
+) => Promise<SlashReply>;
 
 const commands = new Map<string, { handler: SlashHandler; desc: string }>();
 
@@ -109,7 +111,8 @@ register("use", "切换活跃会话（如 /use viplevel）", async (args, ctx, _
     const sessions = listSessions();
     const currentId = ctx.router.getActiveSession(userId);
     const boundId = ctx.watcherManager?.getBoundSessionId();
-    const lines = ["用法: /use <会话名称>\n\n可用会话:"];
+    const lines = ["用法: 复制发送以下任一指令切换会话:"];
+    const parts: string[] = [];
     for (const s of sessions) {
       const markers: string[] = [];
       if (s.id === currentId) markers.push("当前");
@@ -117,7 +120,11 @@ register("use", "切换活跃会话（如 /use viplevel）", async (args, ctx, _
       const suffix = markers.length > 0 ? ` ← ${markers.join(", ")}` : "";
       lines.push(`  • ${s.name}${suffix}`);
     }
-    return lines.join("\n");
+    parts.push(lines.join("\n"));
+    for (const s of sessions) {
+      parts.push(`/use ${s.name}`);
+    }
+    return { parts };
   }
 
   const match = ctx.router.findSessionByName(query);
@@ -152,14 +159,16 @@ register("sessions", "列出所有会话及状态", async (_args, ctx, _client, 
   }
 
   if (!hasBound) {
-    lines.push("\n⚠ 当前未绑定活跃会话，请复制发送:");
+    lines.push("\n⚠ 当前未绑定活跃会话，请复制发送以下任一指令切换:");
   } else {
     lines.push("\n切换会话:");
   }
+
+  const parts: string[] = [lines.join("\n")];
   for (const s of sessions) {
-    lines.push(`/use ${s.name}`);
+    parts.push(`/use ${s.name}`);
   }
-  return lines.join("\n");
+  return { parts };
 });
 
 register("session", "查看当前会话详情", async (_args, ctx, _client, userId) => {
@@ -177,10 +186,12 @@ register("session", "查看当前会话详情", async (_args, ctx, _client, user
     lines.push(`• ${s.name} (${s.id.slice(0, 8)}) — ${age} 前${marker}`);
   }
   if (!hasBound) {
-    lines.push("\n⚠ 当前未绑定活跃会话，请复制发送:");
+    lines.push("\n⚠ 当前未绑定活跃会话，请复制发送以下任一指令切换:");
+    const parts: string[] = [lines.join("\n")];
     for (const s of sessions) {
-      lines.push(`/use ${s.name}`);
+      parts.push(`/use ${s.name}`);
     }
+    return { parts };
   } else {
     lines.push("\n/use <名称> 切换会话");
     lines.push("/rename <新名称> 重命名当前会话");
@@ -200,8 +211,11 @@ register("rename", "重命名当前会话", async (args, ctx, _client, userId) =
     if (sessions.length === 0) {
       return "当前没有活跃会话。请先在 Cursor 中启动一个 Composer 对话。";
     }
-    const cmds = sessions.map(s => `/use ${s.name}`).join("\n");
-    return `当前未绑定活跃会话，请先切换:\n${cmds}`;
+    const parts: string[] = ["当前未绑定活跃会话，请复制发送以下任一指令切换:"];
+    for (const s of sessions) {
+      parts.push(`/use ${s.name}`);
+    }
+    return { parts };
   }
 
   try {
@@ -261,8 +275,15 @@ export async function tryHandleSlashCommand(
   try {
     const reply = await cmd.handler(args, ctx, client, userId);
     const contextToken = loadContextToken(userId);
-    await client.sendText(userId, reply, contextToken);
-    logger.info({ command: cmdName, replyLen: reply.length }, "slash command replied");
+    if (typeof reply === "string") {
+      await client.sendText(userId, reply, contextToken);
+      logger.info({ command: cmdName, replyLen: reply.length }, "slash command replied");
+    } else {
+      for (const part of reply.parts) {
+        await client.sendText(userId, part, contextToken);
+      }
+      logger.info({ command: cmdName, parts: reply.parts.length }, "slash command replied (multi-part)");
+    }
   } catch (err) {
     logger.error({ command: cmdName, err: String(err) }, "slash command error");
     try {

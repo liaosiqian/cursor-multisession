@@ -366,11 +366,11 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
               await this.client.sendText(msg.from_user_id,
                 "当前没有活跃的会话。请先在 Cursor 中启动一个 Composer 对话。", ctx);
             } else {
-              const lines = ["当前未绑定活跃会话，请复制发送以下指令切换：", ""];
+              await this.client.sendText(msg.from_user_id,
+                "当前未绑定活跃会话，请复制发送以下任一指令切换：", ctx);
               for (const s of alive) {
-                lines.push(`/use ${s.name}`);
+                await this.client.sendText(msg.from_user_id, `/use ${s.name}`, ctx);
               }
-              await this.client.sendText(msg.from_user_id, lines.join("\n"), ctx);
             }
           }
         } catch (err) {
