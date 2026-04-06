@@ -58,12 +58,14 @@ export class SessionWatcherManager {
    * Bind to a specific session. Only the bound session's replies/inquiries
    * are forwarded to WeChat. Other sessions still have watchers for inquiry
    * getPending(), but won't push messages.
-   * Pass null to unbind (all sessions forward again).
+   *
+   * Pass null to unbind — when unbound, auto-binds to the sole session if
+   * exactly one exists; otherwise nothing forwards.
    */
   setBoundSession(sessionId: string | null): void {
     this.boundSessionId = sessionId;
     for (const [id, w] of this.watchers) {
-      w.bound = sessionId === null || id === sessionId;
+      w.bound = this.isBound(id);
     }
     logger.info({ boundSessionId: sessionId }, "bound session updated");
   }
@@ -166,7 +168,9 @@ export class SessionWatcherManager {
   }
 
   private isBound(sessionId: string): boolean {
-    return this.boundSessionId === null || this.boundSessionId === sessionId;
+    if (this.boundSessionId) return this.boundSessionId === sessionId;
+    // no explicit binding: auto-bind only if this is the sole watched session
+    return this.watchers.size <= 1;
   }
 
   private startWatcherForSession(sessionId: string, sessionName: string): void {

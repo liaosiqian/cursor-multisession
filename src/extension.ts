@@ -1236,6 +1236,7 @@ function syncBindingsToRouter(accountId: string): void {
 	const entry = accounts.get(accountId);
 	if (!entry?.engine) return;
 	const router = entry.engine.getRouter?.();
+	const wm = entry.engine.getWatcherManager?.();
 	if (!router) {
 		output.appendLine(`[wechat:${entry.account.name}] no router available for binding sync`);
 		return;
@@ -1244,7 +1245,11 @@ function syncBindingsToRouter(accountId: string): void {
 	if (bindings.length > 0) {
 		const defaultSession = bindings[0];
 		router.setDefaultSession?.(defaultSession);
-		output.appendLine(`[wechat:${entry.account.name}] router default session set to ${defaultSession}`);
+		wm?.setBoundSession?.(defaultSession);
+		output.appendLine(`[wechat:${entry.account.name}] router + watcher bound to session ${defaultSession}`);
+	} else {
+		wm?.setBoundSession?.(null);
+		output.appendLine(`[wechat:${entry.account.name}] watcher unbound (no binding sessions)`);
 	}
 }
 
