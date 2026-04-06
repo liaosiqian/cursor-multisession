@@ -503,6 +503,8 @@ function App() {
 	}, []);
 
 	const aliveSessions = sessions.filter(s => s.alive);
+	const closedSessions = sessions.filter(s => !s.alive);
+	const [showClosed, setShowClosed] = useState(false);
 	const currentLogs = logsMap[activeSessionId] || [];
 	const currentPending = pendingMap[activeSessionId] || [];
 	const totalPending = Object.values(pendingMap).reduce((sum, items) => sum + items.length, 0);
@@ -539,11 +541,16 @@ function App() {
 							<button className="dropdown-item" onClick={() => { vscode.postMessage({ type: 'installMcp' }); setSettingsOpen(false); }}>
 								重新安装 MCP + 规则 + Hooks
 							</button>
-							<button className="dropdown-item dropdown-item-danger" onClick={() => { vscode.postMessage({ type: 'uninstallMcp' }); setSettingsOpen(false); }}>
-								卸载 MCP 配置
+						{closedSessions.length > 0 && (
+							<button className="dropdown-item" onClick={() => { setShowClosed(prev => !prev); setSettingsOpen(false); }}>
+								{showClosed ? '隐藏' : '打开'}已关闭会话 ({closedSessions.length})
 							</button>
-							<div className="dropdown-divider" />
-							<div className="dropdown-version">v{extVersion}</div>
+						)}
+						<button className="dropdown-item dropdown-item-danger" onClick={() => { vscode.postMessage({ type: 'uninstallMcp' }); setSettingsOpen(false); }}>
+							卸载 MCP 配置
+						</button>
+						<div className="dropdown-divider" />
+						<div className="dropdown-version">v{extVersion}</div>
 						</div>
 					)}
 				</div>
@@ -612,6 +619,32 @@ function App() {
 				))}
 			</div>
 		)}
+
+			{/* Closed sessions panel */}
+			{showClosed && closedSessions.length > 0 && (
+				<div className="closed-sessions-panel">
+					<div className="closed-sessions-header">
+						<span>已关闭会话</span>
+						<button className="tab-close" onClick={() => setShowClosed(false)}>×</button>
+					</div>
+					<div className="closed-sessions-list">
+						{closedSessions.map(s => (
+							<div key={s.id} className="closed-session-item">
+								<span className="closed-session-name">{s.name}</span>
+								<button
+									className="btn-small"
+									onClick={() => {
+										vscode.postMessage({ type: 'reopenSession', sessionId: s.id });
+										setActiveSessionId(s.id);
+									}}
+								>
+									打开
+								</button>
+							</div>
+						))}
+					</div>
+				</div>
+			)}
 
 			{/* Summary Toast (non-blocking, above message log) */}
 			{summaryMap[activeSessionId] && (

@@ -13,8 +13,31 @@ description: >-
 |---------|---------|
 | `npm run build` | 编译 extension + webview + mcp-server |
 | `npm run deploy` | build + 部署到 `~/.cursor/extensions/` |
+| `npm run release` | bump patch 版本 + build + deploy |
 | `npm run dev` | 监听 src/ 变更，自动 build + deploy |
 | `F5` | 启动 Extension Development Host（支持热更新） |
+
+## 构建部署（Agent 必读）
+
+**任何代码修改后，必须执行以下流程部署到 Cursor。严禁手动复制 dist 文件。**
+
+```bash
+cd /Users/lsq/AIProjects/cursor-multisession
+
+# 标准部署（不改版本号）
+npm run deploy
+
+# 发版部署（自动 bump patch 版本 + build + deploy）
+npm run release
+```
+
+`npm run deploy` 自动完成：
+1. 编译全部 7 个产物（extension.js, wechat-engine.js, webview.js, webview.css, wechat-webview.js, wechat-webview.css, mcp-server.mjs）
+2. 清理 `~/.cursor/extensions/` 中的旧版本目录
+3. 复制所有产物 + package.json + media/icon.svg 到新版本目录
+4. 校验关键文件大小一致性
+
+部署完成后提示用户 **Reload Window**（`Cmd+Shift+P` → `Reload Window`）。
 
 ## 开发工作流
 
@@ -175,6 +198,13 @@ deploy.js 会先删除 `~/.cursor/extensions/` 中所有旧版本再拷贝新文
 ### 6. WeChat 集成隔离
 WeChat engine 引入 `node:crypto`/`node:http` 等模块。在 extension host 中若模块加载阶段产生副作用会导致整个插件激活失败。
 **规则**：WeChat 代码必须懒加载（dynamic import 或延迟 require），不能在顶层 import。
+
+### 7. require() 模块缓存（严重）
+`requireEngineModule()` 加载 `wechat-engine.js` 时必须先清除 `require.cache`，否则 Reload Window 后 Node.js 仍返回旧版模块。当前代码已包含 `delete require.cache[require.resolve(modulePath)]`。
+**规则**：任何通过 `require()` 懒加载的独立 bundle，都必须在加载前清除缓存。
+
+### 8. 部署必须使用 `npm run deploy`
+**严禁手动复制 dist 文件**。`scripts/deploy.js` 会自动复制所有产物（extension.js、wechat-engine.js、webview.js、webview.css、wechat-webview.js、wechat-webview.css、mcp-server.mjs、package.json、media/icon.svg），并清理旧版本目录。手动复制极易遗漏 webview 文件。
 
 ## 故障排查流程（严格按顺序）
 

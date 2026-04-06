@@ -2,7 +2,7 @@
 	"name": "cursor-multisession",
 	"displayName": "MultiSession + WeChat",
 	"description": "Cursor AI 多会话管理面板 + 微信桥接",
-	"version": "0.7.1",
+	"version": "0.7.2",
 	"publisher": "local",
 	"license": "MIT",
 	"engines": {
@@ -99,6 +99,7 @@
 		"watch:webview": "esbuild src/webview/index.tsx --bundle --outfile=dist/webview.js --format=iife --platform=browser --watch",
 		"watch": "npm run compile:css && npm run watch:ext & npm run watch:webview",
 		"deploy": "npm run build && node scripts/deploy.js",
+		"release": "node scripts/release.js",
 		"dev": "node scripts/watch.js",
 		"package": "npm run build && npx @vscode/vsce package --no-dependencies"
 	},

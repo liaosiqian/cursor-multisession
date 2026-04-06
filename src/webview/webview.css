@@ -1077,6 +1077,51 @@ body {
 	text-align: right;
 }
 
+/* ── Closed Sessions Panel ── */
+
+.closed-sessions-panel {
+	border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+	background: var(--vscode-editor-background);
+}
+
+.closed-sessions-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 6px 12px;
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground, #888);
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+
+.closed-sessions-list {
+	max-height: 160px;
+	overflow-y: auto;
+}
+
+.closed-session-item {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 4px 12px;
+	font-size: 12px;
+}
+
+.closed-session-item:hover {
+	background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.04));
+}
+
+.closed-session-name {
+	color: var(--vscode-descriptionForeground, #888);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 1;
+	margin-right: 8px;
+}
+
 /* ── Version Footer ── */
 
 .version-footer {

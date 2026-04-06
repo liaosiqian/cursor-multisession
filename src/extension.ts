@@ -992,6 +992,17 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 					break;
 				}
 
+				case 'reopenSession': {
+					const sessions = readJson<SessionMeta[]>(SESSIONS_FILE) || [];
+					const s = sessions.find(x => x.id === msg.sessionId);
+					if (s) {
+						s.alive = true;
+						writeJson(SESSIONS_FILE, sessions);
+						output.appendLine(`[session] reopened: ${s.name} (${msg.sessionId})`);
+					}
+					break;
+				}
+
 				case 'pickFile': {
 					const uris = await vscode.window.showOpenDialog({
 						canSelectFiles: true,
