@@ -600,6 +600,14 @@ function getCursorRuleContent(): string {
 	return CURSOR_RULE_CONTENT;
 }
 
+function getHooksConfigPath(wsPath: string): string {
+	return path.join(wsPath, '.cursor', 'hooks.json');
+}
+
+function getHookScriptPath(wsPath: string): string {
+	return path.join(wsPath, '.cursor', 'hooks', 'multisession-check-queue.sh');
+}
+
 function installMcpConfig(ctx: vscode.ExtensionContext): 'installed' | 'already' | 'none' {
 	const mcpServerPath = getExtensionMcpServerPath(ctx);
 	const wsPaths = getWorkspacePaths();
@@ -628,6 +636,21 @@ function installMcpConfig(ctx: vscode.ExtensionContext): 'installed' | 'already'
 		ruleMatch = fs.readFileSync(rulePath, 'utf-8') === desiredRuleContent;
 	} catch { /* file doesn't exist */ }
 
+	// hooks idempotency check
+	const hookScriptDst = getHookScriptPath(targetWs);
+	const hookScriptSrc = path.join(ctx.extensionPath, 'dist', 'hooks', 'check-queue.sh');
+	let hookMatch = false;
+	try {
+		hookMatch = fs.existsSync(hookScriptDst) && fs.existsSync(hookScriptSrc)
+			&& fs.readFileSync(hookScriptDst, 'utf-8') === fs.readFileSync(hookScriptSrc, 'utf-8');
+	} catch { /* ignore */ }
+
+	const hooksPath = getHooksConfigPath(targetWs);
+	const hooksConfig = readJson<any>(hooksPath) || { version: 1, hooks: {} };
+	const desiredHookCommand = `.cursor/hooks/multisession-check-queue.sh`;
+	const existingMcpHooks: any[] = hooksConfig.hooks?.beforeMCPExecution || [];
+	const hookConfigMatch = existingMcpHooks.some((h: any) => h.command === desiredHookCommand);
+
 	let duplicatesCleaned = false;
 	for (const ws of wsPaths.slice(1)) {
 		const otherMcpPath = getMcpConfigPath(ws);
@@ -641,35 +664,89 @@ function installMcpConfig(ctx: vscode.ExtensionContext): 'installed' | 'already'
 		try { fs.unlinkSync(otherRulePath); duplicatesCleaned = true; } catch { /* ignore */ }
 	}
 
-	if (mcpMatch && ruleMatch && !duplicatesCleaned) {
+	if (mcpMatch && ruleMatch && hookMatch && hookConfigMatch && !duplicatesCleaned) {
 		return 'already';
 	}
 
+	// install MCP
 	config.mcpServers = config.mcpServers || {};
 	config.mcpServers.MultiSession = desiredMcpEntry;
 	writeJson(mcpPath, config);
 
+	// install rule
 	ensureDir(path.dirname(rulePath));
 	fs.writeFileSync(rulePath, desiredRuleContent, 'utf-8');
+
+	// install hook script
+	try {
+		ensureDir(path.dirname(hookScriptDst));
+		fs.copyFileSync(hookScriptSrc, hookScriptDst);
+		fs.chmodSync(hookScriptDst, 0o755);
+	} catch (e) {
+		output.appendLine(`[install] hook script copy failed: ${e}`);
+	}
+
+	// install hooks.json (merge, don't overwrite other hooks)
+	if (!hookConfigMatch) {
+		hooksConfig.version = hooksConfig.version || 1;
+		hooksConfig.hooks = hooksConfig.hooks || {};
+		hooksConfig.hooks.beforeMCPExecution = hooksConfig.hooks.beforeMCPExecution || [];
+		const filtered = hooksConfig.hooks.beforeMCPExecution.filter(
+			(h: any) => h.command !== desiredHookCommand
+		);
+		filtered.push({ command: desiredHookCommand });
+		hooksConfig.hooks.beforeMCPExecution = filtered;
+		writeJson(hooksPath, hooksConfig);
+	}
 
 	return 'installed';
 }
 
 function uninstallMcpConfig(): number {
 	let count = 0;
+	const hookCommand = `.cursor/hooks/multisession-check-queue.sh`;
+
 	for (const ws of getWorkspacePaths()) {
+		let changed = false;
+
+		// remove MCP config
 		const mcpPath = getMcpConfigPath(ws);
 		const config = readJson<any>(mcpPath);
 		if (config?.mcpServers?.MultiSession) {
 			delete config.mcpServers.MultiSession;
 			writeJson(mcpPath, config);
-
-			// 清理 cursor rule
-			const rulePath = path.join(ws, '.cursor', 'rules', 'multisession.mdc');
-			try { fs.unlinkSync(rulePath); } catch { /* ignore */ }
-
-			count++;
+			changed = true;
 		}
+
+		// remove cursor rule
+		const rulePath = path.join(ws, '.cursor', 'rules', 'multisession.mdc');
+		try { fs.unlinkSync(rulePath); changed = true; } catch { /* ignore */ }
+
+		// remove hook script
+		const hookScriptPath = getHookScriptPath(ws);
+		try { fs.unlinkSync(hookScriptPath); } catch { /* ignore */ }
+
+		// remove hook entry from hooks.json
+		const hooksPath = getHooksConfigPath(ws);
+		const hooksConfig = readJson<any>(hooksPath);
+		if (hooksConfig?.hooks?.beforeMCPExecution) {
+			const before = hooksConfig.hooks.beforeMCPExecution.length;
+			hooksConfig.hooks.beforeMCPExecution = hooksConfig.hooks.beforeMCPExecution.filter(
+				(h: any) => h.command !== hookCommand
+			);
+			if (hooksConfig.hooks.beforeMCPExecution.length === 0) {
+				delete hooksConfig.hooks.beforeMCPExecution;
+			}
+			if (hooksConfig.hooks.beforeMCPExecution?.length !== before) {
+				if (Object.keys(hooksConfig.hooks).length === 0) {
+					try { fs.unlinkSync(hooksPath); } catch { /* ignore */ }
+				} else {
+					writeJson(hooksPath, hooksConfig);
+				}
+			}
+		}
+
+		if (changed) count++;
 	}
 	return count;
 }

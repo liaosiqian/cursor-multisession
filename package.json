@@ -89,7 +89,7 @@
 	"scripts": {
 		"compile:wechat": "esbuild src/wechat/engine.ts --bundle --outfile=dist/wechat-engine.js --format=cjs --platform=node --minify",
 		"compile:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:./wechat-engine.js --format=cjs --platform=node --minify",
-		"compile:css": "node -e \"require('fs').copyFileSync('src/webview/webview.css','dist/webview.css');require('fs').copyFileSync('src/wechat-webview/wechat.css','dist/wechat-webview.css')\"",
+		"compile:css": "node -e \"const fs=require('fs');fs.copyFileSync('src/webview/webview.css','dist/webview.css');fs.copyFileSync('src/wechat-webview/wechat.css','dist/wechat-webview.css');fs.mkdirSync('dist/hooks',{recursive:true});fs.copyFileSync('src/hooks/check-queue.sh','dist/hooks/check-queue.sh');fs.chmodSync('dist/hooks/check-queue.sh',0o755)\"",
 		"compile:webview": "esbuild src/webview/index.tsx --bundle --outfile=dist/webview.js --format=iife --platform=browser --minify && npm run compile:css",
 		"compile:wechat-webview": "esbuild src/wechat-webview/index.tsx --bundle --outfile=dist/wechat-webview.js --format=iife --platform=browser --minify",
 		"compile:mcp": "esbuild mcp-server/index.ts --bundle --outfile=dist/mcp-server.mjs --format=esm --platform=node --minify",
