@@ -901,16 +901,34 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 					const result = installMcpConfig(this.ctx);
 					syncState();
 					if (result === 'already') {
-						vscode.window.showInformationMessage('MCP + 通信规则已是最新，无需重复安装');
+						vscode.window.showInformationMessage('MCP + 通信规则 + Hooks 已是最新，无需重复安装');
 					} else if (result === 'installed') {
 						vscode.window.showInformationMessage(
-							'MCP + 通信规则已安装，请重启 Cursor 生效',
+							'MCP + 通信规则 + Hooks 已安装，请重启 Cursor 生效',
 							'重启 Cursor'
 						).then(choice => {
 							if (choice === '重启 Cursor') {
 								vscode.commands.executeCommand('workbench.action.reloadWindow');
 							}
 						});
+					}
+					break;
+				}
+
+				case 'uninstallMcp': {
+					const count = uninstallMcpConfig();
+					syncState();
+					if (count > 0) {
+						vscode.window.showInformationMessage(
+							`已卸载 ${count} 个工作区的 MCP + 规则 + Hooks 配置`,
+							'重启 Cursor'
+						).then(choice => {
+							if (choice === '重启 Cursor') {
+								vscode.commands.executeCommand('workbench.action.reloadWindow');
+							}
+						});
+					} else {
+						vscode.window.showInformationMessage('未找到 MCP 配置');
 					}
 					break;
 				}

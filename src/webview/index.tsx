@@ -91,6 +91,8 @@ function App() {
 	const [acItems, setAcItems] = useState<{ id: string; label: string; desc?: string }[]>([]);
 	const [acMode, setAcMode] = useState<'skill' | 'history' | null>(null);
 	const [acIndex, setAcIndex] = useState(0);
+	const [settingsOpen, setSettingsOpen] = useState(false);
+	const settingsRef = useRef<HTMLDivElement>(null);
 
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const messageLogRef = useRef<HTMLDivElement>(null);
@@ -102,6 +104,18 @@ function App() {
 	useEffect(() => {
 		vscode.setState({ sessions, activeSessionId, logsMap, pendingMap, mcpConfigured, rulePrompt, inquiryMap, summaryMap });
 	}, [sessions, activeSessionId, logsMap, pendingMap, mcpConfigured, rulePrompt, inquiryMap, summaryMap]);
+
+	// close settings dropdown on outside click
+	useEffect(() => {
+		if (!settingsOpen) return;
+		const onClick = (e: MouseEvent) => {
+			if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+				setSettingsOpen(false);
+			}
+		};
+		document.addEventListener('click', onClick, true);
+		return () => document.removeEventListener('click', onClick, true);
+	}, [settingsOpen]);
 
 	// track user scroll position
 	useEffect(() => {
@@ -501,17 +515,37 @@ function App() {
 					<span className={`status-dot ${aliveSessions.length > 0 ? 'connected' : 'disconnected'}`} />
 					<span className="topbar-title">MultiSession</span>
 				</div>
-				<div className="topbar-right">
-				<button className="btn-small" onClick={handleCopyRule} data-tooltip="复制通信规则到剪贴板（粘贴到新 Composer 启动会话）" data-tooltip-pos="left">
-					规则
-				</button>
-				<button className="btn-small btn-accent" onClick={handleReconnect} data-tooltip="重连 Composer（断开时使用）" data-tooltip-pos="left">
-					重连
-				</button>
-					{totalPending > 0 && (
-						<span className="badge">{totalPending}</span>
+			<div className="topbar-right">
+			<button className="btn-small" onClick={handleCopyRule} data-tooltip="复制通信规则到剪贴板（粘贴到新 Composer 启动会话）" data-tooltip-pos="left">
+				规则
+			</button>
+			<button className="btn-small btn-accent" onClick={handleReconnect} data-tooltip="重连 Composer（断开时使用）" data-tooltip-pos="left">
+				重连
+			</button>
+				{totalPending > 0 && (
+					<span className="badge">{totalPending}</span>
+				)}
+				<div className="settings-wrapper" ref={settingsRef}>
+					<button
+						className="btn-small btn-icon"
+						onClick={() => setSettingsOpen(prev => !prev)}
+						data-tooltip="设置"
+						data-tooltip-pos="left"
+					>
+						⚙
+					</button>
+					{settingsOpen && (
+						<div className="settings-dropdown">
+							<button className="dropdown-item" onClick={() => { vscode.postMessage({ type: 'installMcp' }); setSettingsOpen(false); }}>
+								重新安装 MCP + 规则 + Hooks
+							</button>
+							<button className="dropdown-item dropdown-item-danger" onClick={() => { vscode.postMessage({ type: 'uninstallMcp' }); setSettingsOpen(false); }}>
+								卸载 MCP 配置
+							</button>
+						</div>
 					)}
 				</div>
+			</div>
 			</div>
 
 			{/* MCP not configured - prompt user to install */}

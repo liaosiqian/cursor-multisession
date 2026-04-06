@@ -1005,6 +1005,65 @@ body {
 	font-family: inherit;
 }
 
+/* ── Settings Dropdown ── */
+
+.settings-wrapper {
+	position: relative;
+	display: inline-block;
+}
+
+.btn-icon {
+	font-size: 14px;
+	line-height: 1;
+	padding: 2px 5px;
+}
+
+.settings-dropdown {
+	position: absolute;
+	top: calc(100% + 4px);
+	right: 0;
+	min-width: 200px;
+	background: var(--vscode-menu-background, var(--bg2));
+	border: 1px solid var(--vscode-menu-border, var(--border));
+	border-radius: 6px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+	z-index: 2000;
+	padding: 4px 0;
+	animation: fadeIn 0.1s ease;
+}
+
+@keyframes fadeIn {
+	from { opacity: 0; transform: translateY(-4px); }
+	to   { opacity: 1; transform: translateY(0); }
+}
+
+.dropdown-item {
+	display: block;
+	width: 100%;
+	padding: 6px 12px;
+	font-size: 12px;
+	text-align: left;
+	background: none;
+	border: none;
+	color: var(--vscode-menu-foreground, var(--fg));
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.dropdown-item:hover {
+	background: var(--vscode-menu-selectionBackground, var(--accent));
+	color: var(--vscode-menu-selectionForeground, #fff);
+}
+
+.dropdown-item-danger {
+	color: var(--vscode-errorForeground, #f44);
+}
+
+.dropdown-item-danger:hover {
+	background: var(--vscode-errorForeground, #f44);
+	color: #fff;
+}
+
 /* ── Version Footer ── */
 
 .version-footer {
