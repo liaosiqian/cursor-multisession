@@ -48,6 +48,37 @@ export interface EngineEvents {
 
 const WECHAT_ACTION_DIR = path.join(os.homedir(), '.multisession', 'wechat-actions');
 
+const ENGINE_LOCK_DIR = path.join(os.homedir(), '.multisession');
+const ENGINE_LOCK_FILE = path.join(ENGINE_LOCK_DIR, 'wechat-engine.lock');
+const LOCK_STALE_MS = 60_000;
+
+function tryAcquireEngineLock(instanceId: string): boolean {
+  try {
+    if (!fs.existsSync(ENGINE_LOCK_DIR)) fs.mkdirSync(ENGINE_LOCK_DIR, { recursive: true });
+    if (fs.existsSync(ENGINE_LOCK_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(ENGINE_LOCK_FILE, 'utf-8'));
+      if (raw.id === instanceId) return true;
+      if (Date.now() - raw.ts < LOCK_STALE_MS) return false;
+    }
+    fs.writeFileSync(ENGINE_LOCK_FILE, JSON.stringify({ id: instanceId, ts: Date.now() }), 'utf-8');
+    return true;
+  } catch { return false; }
+}
+
+function renewEngineLock(instanceId: string): void {
+  try {
+    fs.writeFileSync(ENGINE_LOCK_FILE, JSON.stringify({ id: instanceId, ts: Date.now() }), 'utf-8');
+  } catch { /* best effort */ }
+}
+
+function releaseEngineLock(instanceId: string): void {
+  try {
+    if (!fs.existsSync(ENGINE_LOCK_FILE)) return;
+    const raw = JSON.parse(fs.readFileSync(ENGINE_LOCK_FILE, 'utf-8'));
+    if (raw.id === instanceId) fs.unlinkSync(ENGINE_LOCK_FILE);
+  } catch { /* best effort */ }
+}
+
 export class ClawBotEngine extends EventEmitter<EngineEvents> {
   private state: EngineState = "idle";
   private client: ClawBotClient | null = null;
@@ -65,6 +96,10 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
   private skipServer: boolean;
   private actionWatcher: fs.FSWatcher | null = null;
   private actionProcessing = false;
+  private instanceId = `eng-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  private lockRenewTimer: ReturnType<typeof setInterval> | null = null;
+  private seenMessageIds = new Set<number>();
+  private readonly MAX_SEEN_IDS = 2000;
 
   constructor(accountId?: string, options?: { skipServer?: boolean }) {
     super();
@@ -161,7 +196,16 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
 
   async connect(): Promise<void> {
     if (this.state === "connected" || this.state === "connecting") return;
+
+    if (!tryAcquireEngineLock(this.instanceId)) {
+      logger.warn("another Cursor window already owns the WeChat engine lock, skipping connect");
+      this.setState("idle");
+      return;
+    }
+
     this.setState("connecting");
+
+    this.lockRenewTimer = setInterval(() => renewEngineLock(this.instanceId), LOCK_STALE_MS / 3);
 
     try {
       const rawConfig = loadConfig();
@@ -206,6 +250,16 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
       this.poller.on("message", async (msg) => {
         try {
           if (msg.message_type === MessageType.BOT) return;
+
+          if (msg.message_id) {
+            if (this.seenMessageIds.has(msg.message_id)) return;
+            this.seenMessageIds.add(msg.message_id);
+            if (this.seenMessageIds.size > this.MAX_SEEN_IDS) {
+              const first = this.seenMessageIds.values().next().value;
+              if (first !== undefined) this.seenMessageIds.delete(first);
+            }
+          }
+
           if (msg.context_token && msg.from_user_id) {
             saveContextToken(msg.from_user_id, msg.context_token);
           }
@@ -348,6 +402,8 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
   }
 
   disconnect(): void {
+    if (this.lockRenewTimer) { clearInterval(this.lockRenewTimer); this.lockRenewTimer = null; }
+    releaseEngineLock(this.instanceId);
     this.actionWatcher?.close();
     this.actionWatcher = null;
     this.watcherManager?.stop();
@@ -361,6 +417,7 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
     this.media = null;
     this.connectedSince = null;
     this.pendingReply = false;
+    this.seenMessageIds.clear();
     this.setState("idle");
   }
 
