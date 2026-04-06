@@ -34,7 +34,7 @@ function register(name: string, desc: string, handler: SlashHandler) {
   commands.set(name, { handler, desc });
 }
 
-register("status", "Show engine & pipeline status", async (_args, ctx) => {
+register("status", "查看引擎和会话状态", async (_args, ctx) => {
   const lines: string[] = ["--- ClawBot Status ---"];
 
   lines.push(`State: ${ctx.engineState}`);
@@ -78,7 +78,7 @@ register("status", "Show engine & pipeline status", async (_args, ctx) => {
   return lines.join("\n");
 });
 
-register("ping", "Measure API round-trip latency", async (_args, _ctx, client, userId) => {
+register("ping", "测量 API 往返延迟", async (_args, _ctx, client, userId) => {
   const t0 = Date.now();
   try {
     await client.getConfig(userId);
@@ -90,15 +90,15 @@ register("ping", "Measure API round-trip latency", async (_args, _ctx, client, u
   }
 });
 
-register("help", "List available commands", async () => {
-  const lines = ["--- Available Commands ---"];
+register("help", "显示所有可用命令", async () => {
+  const lines = ["--- 可用命令 ---"];
   for (const [name, { desc }] of commands) {
     lines.push(`/${name} — ${desc}`);
   }
   return lines.join("\n");
 });
 
-register("use", "Switch active session (e.g. /use viplevel)", async (args, ctx, _client, userId) => {
+register("use", "切换活跃会话（如 /use viplevel）", async (args, ctx, _client, userId) => {
   if (!ctx.router) {
     return "Message router not available.";
   }
@@ -127,7 +127,7 @@ register("use", "Switch active session (e.g. /use viplevel)", async (args, ctx, 
   return `✓ 已切换到 [${match.name}]\n后续消息和 AI 回复将只通过此会话收发。`;
 });
 
-register("sessions", "List all sessions with status", async (_args, ctx, _client, userId) => {
+register("sessions", "列出所有会话及状态", async (_args, ctx, _client, userId) => {
   const sessions = listSessions();
   if (sessions.length === 0) {
     return "No active sessions.";
@@ -155,7 +155,7 @@ register("sessions", "List all sessions with status", async (_args, ctx, _client
   return lines.join("\n");
 });
 
-register("session", "Show MultiSession details", async (_args, ctx, _client, userId) => {
+register("session", "查看当前会话详情", async (_args, ctx, _client, userId) => {
   const sessions = listSessions();
   if (sessions.length === 0) {
     return "No active MultiSession sessions.";
@@ -172,7 +172,7 @@ register("session", "Show MultiSession details", async (_args, ctx, _client, use
   return lines.join("\n");
 });
 
-register("rename", "Rename the current session", async (args, ctx, _client, userId) => {
+register("rename", "重命名当前会话", async (args, ctx, _client, userId) => {
   const newName = args.trim();
   if (!newName) {
     return "Usage: /rename <new name>\nExample: /rename my-project";

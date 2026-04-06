@@ -16,7 +16,7 @@ import {
   clearCredentials,
   type StoredCredentials,
 } from './auth/store';
-import { pushMessage, getSessionName } from './bridge/multisession';
+import { pushMessage, getSessionName, listSessions } from './bridge/multisession';
 import { SessionWatcherManager } from './bridge/session-watcher-manager';
 import { MessageRouter } from './bridge/message-router';
 import { matchAnswer, answerInquiry } from './bridge/inquiry-watcher';
@@ -250,11 +250,14 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
           );
           if (handled) return;
 
-          // 2. cross-session inquiry matching
-          const allPending = this.watcherManager?.getAllPendingInquiries() ?? [];
-          if (allPending.length > 0 && this.client) {
-            // prefer inquiry from the user's active session, then by time
-            const sorted = [...allPending].sort((a, b) => {
+          // 2. inquiry matching (scoped to bound session if set)
+          const boundId = this.watcherManager?.getBoundSessionId() ?? null;
+          let pendingInquiries = this.watcherManager?.getAllPendingInquiries() ?? [];
+          if (boundId) {
+            pendingInquiries = pendingInquiries.filter(p => p.sessionId === boundId);
+          }
+          if (pendingInquiries.length > 0 && this.client) {
+            const sorted = [...pendingInquiries].sort((a, b) => {
               const aIsActive = a.sessionId === activeSessionId ? 0 : 1;
               const bIsActive = b.sessionId === activeSessionId ? 0 : 1;
               if (aIsActive !== bIsActive) return aIsActive - bIsActive;
@@ -300,11 +303,15 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
             this.emit("replyPending");
           } else {
             const ctx = loadContextToken(msg.from_user_id);
-            await this.client.sendText(
-              msg.from_user_id,
-              "No active session. Use /sessions to see available sessions, then /use <name> to select one.",
-              ctx,
-            );
+            const alive = listSessions();
+            let hint: string;
+            if (alive.length === 0) {
+              hint = "当前没有活跃的会话。请先在 Cursor 中启动一个 Composer 对话。";
+            } else {
+              const names = alive.map(s => `  • ${s.name}`).join("\n");
+              hint = `当前未绑定任何会话。\n\n可用会话：\n${names}\n\n请发送 /use <名称> 切换，例如：/use ${alive[0].name}`;
+            }
+            await this.client.sendText(msg.from_user_id, hint, ctx);
           }
         } catch (err) {
           logger.error({ err: String(err) }, "message handler error");
