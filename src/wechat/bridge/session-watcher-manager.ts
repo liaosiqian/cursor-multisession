@@ -19,6 +19,7 @@ interface SessionWatcher {
   sessionName: string;
   stopReply: () => void;
   inquiryHandle: { stop: () => void; getPending: () => PendingInquiry | null };
+  bound: boolean;
 }
 
 export interface ReplySentEvent {
@@ -38,6 +39,7 @@ export class SessionWatcherManager {
   private rescanTimer: ReturnType<typeof setTimeout> | null = null;
   private onReplySent: ((ev: ReplySentEvent) => void) | null = null;
   private isUserActive: (() => boolean) | null = null;
+  private boundSessionId: string | null = null;
 
   constructor(
     private client: ClawBotClient,
@@ -50,6 +52,24 @@ export class SessionWatcherManager {
 
   setIsUserActive(cb: () => boolean): void {
     this.isUserActive = cb;
+  }
+
+  /**
+   * Bind to a specific session. Only the bound session's replies/inquiries
+   * are forwarded to WeChat. Other sessions still have watchers for inquiry
+   * getPending(), but won't push messages.
+   * Pass null to unbind (all sessions forward again).
+   */
+  setBoundSession(sessionId: string | null): void {
+    this.boundSessionId = sessionId;
+    for (const [id, w] of this.watchers) {
+      w.bound = sessionId === null || id === sessionId;
+    }
+    logger.info({ boundSessionId: sessionId }, "bound session updated");
+  }
+
+  getBoundSessionId(): string | null {
+    return this.boundSessionId;
   }
 
   start(): void {
@@ -145,8 +165,18 @@ export class SessionWatcherManager {
     }
   }
 
+  private isBound(sessionId: string): boolean {
+    return this.boundSessionId === null || this.boundSessionId === sessionId;
+  }
+
   private startWatcherForSession(sessionId: string, sessionName: string): void {
     try {
+      const isBoundForSession = () => this.isBound(sessionId);
+      const isActiveAndBound = () => {
+        if (!isBoundForSession()) return false;
+        return this.isUserActive ? this.isUserActive() : true;
+      };
+
       const stopReply = startReplyWatcher(
         sessionId,
         this.client,
@@ -156,13 +186,15 @@ export class SessionWatcherManager {
           this.onReplySent?.({ sessionId, sessionName: currentName, text });
         },
         sessionName,
-        { isUserActive: this.isUserActive ? () => this.isUserActive!() : undefined },
+        { isUserActive: isActiveAndBound },
       );
 
       const inquiryHandle = startInquiryWatcher(
         sessionId,
         this.client,
         this.targetUserId,
+        undefined,
+        { isUserActive: isActiveAndBound },
       );
 
       this.watchers.set(sessionId, {
@@ -170,9 +202,10 @@ export class SessionWatcherManager {
         sessionName,
         stopReply,
         inquiryHandle,
+        bound: this.isBound(sessionId),
       });
 
-      logger.info({ sessionId, sessionName }, "watcher started for session");
+      logger.info({ sessionId, sessionName, bound: this.isBound(sessionId) }, "watcher started for session");
     } catch (err) {
       logger.error(
         {

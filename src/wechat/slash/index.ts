@@ -123,7 +123,8 @@ register("use", "Switch active session (e.g. /use viplevel)", async (args, ctx, 
   }
 
   ctx.router.setActiveSession(userId, match.id);
-  return `✓ 已切换到 [${match.name}]\n后续消息将发送到此会话。`;
+  ctx.watcherManager?.setBoundSession(match.id);
+  return `✓ 已切换到 [${match.name}]\n后续消息和 AI 回复将只通过此会话收发。`;
 });
 
 register("sessions", "List all sessions with status", async (_args, ctx, _client, userId) => {
@@ -133,15 +134,18 @@ register("sessions", "List all sessions with status", async (_args, ctx, _client
   }
 
   const currentId = ctx.router?.getActiveSession(userId);
+  const boundId = ctx.watcherManager?.getBoundSessionId();
   const watchedIds = ctx.watcherManager?.getWatchedSessionIds() ?? [];
   const lines = ["--- Sessions ---"];
 
   for (const s of sessions) {
     const isCurrent = s.id === currentId;
+    const isBound = s.id === boundId;
     const isWatched = watchedIds.includes(s.id);
     const age = formatDuration(Date.now() - s.lastActiveAt);
     const markers: string[] = [];
     if (isCurrent) markers.push("current");
+    if (isBound) markers.push("bound");
     if (isWatched) markers.push("watched");
     const suffix = markers.length > 0 ? ` [${markers.join(", ")}]` : "";
     lines.push(`• ${s.name} — ${age} ago${suffix}`);

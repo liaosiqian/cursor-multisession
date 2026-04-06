@@ -71,14 +71,18 @@ export function startReplyWatcher(
 
   const sentFingerprints = new Set<string>();
   let lastTs = 0;
+  let processing = false;
   const initial = readSummarySafe(summaryPath);
   if (initial) {
     lastTs = initial.ts ?? 0;
+    sentFingerprints.add(fingerprint(initial));
   }
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   const processSummary = async (): Promise<void> => {
+    if (processing) return;
+    processing = true;
     try {
       const data = readSummarySafe(summaryPath);
       if (!data || !data.text || !data.ts || data.ts <= lastTs) return;
@@ -126,6 +130,8 @@ export function startReplyWatcher(
         { err: err instanceof Error ? err.message : String(err) },
         "reply watcher error",
       );
+    } finally {
+      processing = false;
     }
   };
 

@@ -142,15 +142,23 @@ export function answerInquiry(
   );
 }
 
+export interface InquiryWatcherOptions {
+  isUserActive?: () => boolean;
+}
+
 /**
  * Watch inquiry.json for new AI questions and forward them to WeChat.
  * Returns a cleanup function and a reference to the current pending inquiry.
+ *
+ * If `options.isUserActive` is provided, inquiries are only forwarded when
+ * the function returns true (e.g. user sent a WeChat message within the last 30 min).
  */
 export function startInquiryWatcher(
   sessionId: string,
   client: ClawBotClient,
   targetUserId: string,
   onInquiryForwarded?: (inquiry: Inquiry) => void,
+  options?: InquiryWatcherOptions,
 ): {
   stop: () => void;
   getPending: () => PendingInquiry | null;
@@ -166,21 +174,38 @@ export function startInquiryWatcher(
 
   let lastInquiryId = "";
   let pendingInquiry: PendingInquiry | null = null;
+  const sentInquiryIds = new Set<string>();
+  let processing = false;
 
   const initial = readInquirySafe(inquiryPath);
   if (initial) {
     lastInquiryId = initial.id;
+    sentInquiryIds.add(initial.id);
   }
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   const processInquiry = async (): Promise<void> => {
+    if (processing) return;
+    processing = true;
     try {
       const data = readInquirySafe(inquiryPath);
-      if (!data || data.answered || data.id === lastInquiryId) return;
+      if (!data || data.answered || data.id === lastInquiryId || sentInquiryIds.has(data.id)) {
+        processing = false;
+        return;
+      }
 
       lastInquiryId = data.id;
+      sentInquiryIds.add(data.id);
       pendingInquiry = { inquiry: data, sessionId };
+
+      if (options?.isUserActive && !options.isUserActive()) {
+        logger.info(
+          { sessionId, inquiryId: data.id },
+          "inquiry watcher: skipping send — user not active in WeChat recently",
+        );
+        return;
+      }
 
       const message = formatInquiryMessage(data);
       const ctx = loadContextToken(targetUserId);
@@ -197,6 +222,8 @@ export function startInquiryWatcher(
         { err: err instanceof Error ? err.message : String(err) },
         "inquiry watcher error",
       );
+    } finally {
+      processing = false;
     }
   };
 
