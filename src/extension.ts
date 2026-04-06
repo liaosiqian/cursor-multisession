@@ -1223,7 +1223,9 @@ function saveAccounts(): void {
 }
 
 function requireEngineModule(): any {
-	return require(path.join(__dirname, 'wechat-engine.js'));
+	const modulePath = path.join(__dirname, 'wechat-engine.js');
+	delete require.cache[require.resolve(modulePath)];
+	return require(modulePath);
 }
 
 const ACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
@@ -1232,24 +1234,49 @@ function isAccountActive(entry: AccountEntry): boolean {
 	return entry.lastActivityTs > 0 && (Date.now() - entry.lastActivityTs) < ACTIVITY_TIMEOUT_MS;
 }
 
+function writeBindingFile(sessionId: string | null, source: string): void {
+	const bindingFile = path.join(os.homedir(), '.multisession', 'wechat-binding.json');
+	try {
+		const dir = path.dirname(bindingFile);
+		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(bindingFile, JSON.stringify({
+			boundSessionId: sessionId,
+			updatedAt: Date.now(),
+		}, null, 2), 'utf-8');
+		output.appendLine(`[wechat] binding file → ${sessionId ?? 'null'} (source: ${source})`);
+	} catch (e: any) {
+		output.appendLine(`[wechat] binding file write error: ${e.message}`);
+	}
+}
+
 function syncBindingsToRouter(accountId: string): void {
 	const entry = accounts.get(accountId);
-	if (!entry?.engine) return;
+	if (!entry) return;
+	const bindings = entry.account.bindingSessions;
+
+	if (bindings.length > 0) {
+		writeBindingFile(bindings[0], entry.account.name);
+	} else {
+		// Only clear binding if NO account has a binding
+		const anyBound = [...accounts.values()].some(e =>
+			e.account.id !== accountId && e.account.bindingSessions.length > 0
+		);
+		if (!anyBound) {
+			writeBindingFile(null, `${entry.account.name} (no bindings anywhere)`);
+		} else {
+			output.appendLine(`[wechat:${entry.account.name}] no binding, but another account has one — not clearing`);
+		}
+	}
+
+	// Router/watcher sync requires engine
+	if (!entry.engine) return;
 	const router = entry.engine.getRouter?.();
 	const wm = entry.engine.getWatcherManager?.();
-	if (!router) {
-		output.appendLine(`[wechat:${entry.account.name}] no router available for binding sync`);
-		return;
+	if (router && bindings.length > 0) {
+		router.setDefaultSession?.(bindings[0]);
 	}
-	const bindings = entry.account.bindingSessions;
-	if (bindings.length > 0) {
-		const defaultSession = bindings[0];
-		router.setDefaultSession?.(defaultSession);
-		wm?.setBoundSession?.(defaultSession);
-		output.appendLine(`[wechat:${entry.account.name}] router + watcher bound to session ${defaultSession}`);
-	} else {
-		wm?.setBoundSession?.(null);
-		output.appendLine(`[wechat:${entry.account.name}] watcher unbound (no binding sessions)`);
+	if (wm) {
+		wm.setBoundSession?.(bindings.length > 0 ? bindings[0] : null);
 	}
 }
 
@@ -1301,6 +1328,17 @@ function createEngine(accountId: string): any {
 
 	engine.on('error', (err: Error) => {
 		output.appendLine(`[wechat:${entry.account.name}] error: ${err.message}`);
+	});
+
+	engine.on('boundSessionChanged', (sessionId: string | null) => {
+		if (sessionId) {
+			entry.account.bindingSessions = [sessionId];
+		} else {
+			entry.account.bindingSessions = [];
+		}
+		saveAccounts();
+		output.appendLine(`[wechat:${entry.account.name}] bound session changed via /use: ${sessionId ?? 'none'}`);
+		pushFullState();
 	});
 
 	return engine;
@@ -1476,12 +1514,10 @@ class WeChatViewProvider implements vscode.WebviewViewProvider {
 					case 'bindSession': {
 						const entry = accounts.get(msg.accountId);
 						if (!entry) break;
-						if (!entry.account.bindingSessions.includes(msg.sessionId)) {
-							entry.account.bindingSessions.push(msg.sessionId);
-							saveAccounts();
-							syncBindingsToRouter(msg.accountId);
-							pushFullState();
-						}
+						entry.account.bindingSessions = [msg.sessionId];
+						saveAccounts();
+						syncBindingsToRouter(msg.accountId);
+						pushFullState();
 						break;
 					}
 					case 'unbindSession': {
@@ -1491,6 +1527,55 @@ class WeChatViewProvider implements vscode.WebviewViewProvider {
 						saveAccounts();
 						syncBindingsToRouter(msg.accountId);
 						pushFullState();
+						break;
+					}
+					case 'confirmBindSwitch': {
+						const entry = accounts.get(msg.accountId);
+						if (!entry) break;
+						const allSessions = getSessionsForThisWorkspace();
+						const currentName = allSessions.find(s => s.id === msg.currentSessionId)?.name ?? msg.currentSessionId?.substring(0, 8) ?? '未知';
+						const targetName = msg.sessionName ?? '未知';
+						const choice = await vscode.window.showWarningMessage(
+							`当前已绑定「${currentName}」，确认切换到「${targetName}」？\n切换后「${currentName}」将不再收发微信消息。`,
+							{ modal: true },
+							'确认切换'
+						);
+						if (choice === '确认切换') {
+							entry.account.bindingSessions = [msg.sessionId];
+							saveAccounts();
+							syncBindingsToRouter(msg.accountId);
+							pushFullState();
+						}
+						break;
+					}
+					case 'confirmBindSteal': {
+						const entry = accounts.get(msg.accountId);
+						if (!entry) break;
+						const otherName = msg.otherAccountName ?? '其他账号';
+						const targetName = msg.sessionName ?? '未知';
+						let prompt = `「${targetName}」当前已被账号「${otherName}」绑定。`;
+						if (msg.currentSessionId) {
+							const allSessions2 = getSessionsForThisWorkspace();
+							const curName = allSessions2.find(s => s.id === msg.currentSessionId)?.name ?? msg.currentSessionId.substring(0, 8);
+							prompt += `\n当前账号已绑定「${curName}」，切换后将解除。`;
+						}
+						prompt += `\n\n确认抢占绑定到「${targetName}」？`;
+						const choice2 = await vscode.window.showWarningMessage(
+							prompt,
+							{ modal: true },
+							'确认抢占'
+						);
+						if (choice2 === '确认抢占') {
+							const otherEntry = accounts.get(msg.otherAccountId);
+							if (otherEntry) {
+								otherEntry.account.bindingSessions = otherEntry.account.bindingSessions.filter((s: string) => s !== msg.sessionId);
+								syncBindingsToRouter(msg.otherAccountId);
+							}
+							entry.account.bindingSessions = [msg.sessionId];
+							saveAccounts();
+							syncBindingsToRouter(msg.accountId);
+							pushFullState();
+						}
 						break;
 					}
 					case 'requestState':

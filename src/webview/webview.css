@@ -1064,6 +1064,19 @@ body {
 	color: #fff;
 }
 
+.dropdown-divider {
+	height: 1px;
+	margin: 4px 0;
+	background: var(--vscode-menu-separatorBackground, rgba(255,255,255,0.1));
+}
+
+.dropdown-version {
+	padding: 4px 12px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground, #888);
+	text-align: right;
+}
+
 /* ── Version Footer ── */
 
 .version-footer {

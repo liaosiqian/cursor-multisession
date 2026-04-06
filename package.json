@@ -2,7 +2,7 @@
 	"name": "cursor-multisession",
 	"displayName": "MultiSession + WeChat",
 	"description": "Cursor AI 多会话管理面板 + 微信桥接",
-	"version": "0.6.0",
+	"version": "0.7.1",
 	"publisher": "local",
 	"license": "MIT",
 	"engines": {

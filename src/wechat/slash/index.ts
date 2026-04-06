@@ -19,6 +19,7 @@ export interface SlashContext {
   pendingReply: boolean;
   router: MessageRouter | null;
   watcherManager: SessionWatcherManager | null;
+  onBoundSessionChanged?: (sessionId: string | null) => void;
 }
 
 type SlashHandler = (
@@ -35,45 +36,45 @@ function register(name: string, desc: string, handler: SlashHandler) {
 }
 
 register("status", "查看引擎和会话状态", async (_args, ctx) => {
-  const lines: string[] = ["--- ClawBot Status ---"];
+  const lines: string[] = ["--- 引擎状态 ---"];
 
-  lines.push(`State: ${ctx.engineState}`);
+  lines.push(`状态: ${ctx.engineState}`);
 
   if (ctx.connectedSince) {
     const uptime = Date.now() - ctx.connectedSince;
-    lines.push(`Uptime: ${formatDuration(uptime)}`);
+    lines.push(`运行时间: ${formatDuration(uptime)}`);
   }
 
   const creds = loadCredentials();
-  lines.push(`Bot: ${creds?.botId ?? "N/A"}`);
+  lines.push(`Bot: ${creds?.botId ?? "无"}`);
 
   const sessions = listSessions();
-  const watchedIds = ctx.watcherManager?.getWatchedSessionIds() ?? [];
-  lines.push(`Sessions: ${sessions.length} alive, ${watchedIds.length} watched`);
+  const boundId = ctx.watcherManager?.getBoundSessionId();
+  lines.push(`会话: ${sessions.length} 个活跃`);
 
   for (const s of sessions) {
-    const isWatched = watchedIds.includes(s.id);
+    const isBound = s.id === boundId;
     const age = formatDuration(Date.now() - s.lastActiveAt);
-    lines.push(`  ${isWatched ? "●" : "○"} ${s.name} — ${age} ago`);
+    lines.push(`  ${isBound ? "●" : "○"} ${s.name} — ${age} 前${isBound ? " [已绑定]" : ""}`);
   }
 
   if (ctx.lastMessageAt) {
     const ago = Date.now() - ctx.lastMessageAt;
-    lines.push(`Last msg received: ${formatDuration(ago)} ago`);
+    lines.push(`最近收到消息: ${formatDuration(ago)} 前`);
   } else {
-    lines.push("Last msg received: none");
+    lines.push("最近收到消息: 无");
   }
 
   if (ctx.lastReplyAt) {
     const ago = Date.now() - ctx.lastReplyAt;
-    lines.push(`Last reply sent: ${formatDuration(ago)} ago`);
+    lines.push(`最近发送回复: ${formatDuration(ago)} 前`);
   } else {
-    lines.push("Last reply sent: none");
+    lines.push("最近发送回复: 无");
   }
 
-  lines.push(`Pending reply: ${ctx.pendingReply ? "YES (AI thinking...)" : "no"}`);
-  lines.push(`Host: ${os.hostname()} | Node ${process.version}`);
-  lines.push(`Memory: ${(process.memoryUsage.rss() / 1024 / 1024).toFixed(0)}MB`);
+  lines.push(`等待回复: ${ctx.pendingReply ? "是 (AI 思考中...)" : "无"}`);
+  lines.push(`主机: ${os.hostname()} | Node ${process.version}`);
+  lines.push(`内存: ${(process.memoryUsage.rss() / 1024 / 1024).toFixed(0)}MB`);
 
   return lines.join("\n");
 });
@@ -83,10 +84,10 @@ register("ping", "测量 API 往返延迟", async (_args, _ctx, client, userId) 
   try {
     await client.getConfig(userId);
     const latency = Date.now() - t0;
-    return `Pong! API latency: ${latency}ms`;
+    return `Pong! API 延迟: ${latency}ms`;
   } catch (err) {
     const latency = Date.now() - t0;
-    return `Ping failed (${latency}ms): ${err instanceof Error ? err.message : String(err)}`;
+    return `Ping 失败 (${latency}ms): ${err instanceof Error ? err.message : String(err)}`;
   }
 });
 
@@ -100,17 +101,21 @@ register("help", "显示所有可用命令", async () => {
 
 register("use", "切换活跃会话（如 /use viplevel）", async (args, ctx, _client, userId) => {
   if (!ctx.router) {
-    return "Message router not available.";
+    return "消息路由不可用。";
   }
 
   const query = args.trim();
   if (!query) {
     const sessions = listSessions();
     const currentId = ctx.router.getActiveSession(userId);
-    const lines = ["Usage: /use <session name>\n\nAvailable sessions:"];
+    const boundId = ctx.watcherManager?.getBoundSessionId();
+    const lines = ["用法: /use <会话名称>\n\n可用会话:"];
     for (const s of sessions) {
-      const marker = s.id === currentId ? " ← current" : "";
-      lines.push(`  • ${s.name}${marker}`);
+      const markers: string[] = [];
+      if (s.id === currentId) markers.push("当前");
+      if (s.id === boundId) markers.push("已绑定");
+      const suffix = markers.length > 0 ? ` ← ${markers.join(", ")}` : "";
+      lines.push(`  • ${s.name}${suffix}`);
     }
     return lines.join("\n");
   }
@@ -119,68 +124,84 @@ register("use", "切换活跃会话（如 /use viplevel）", async (args, ctx, _
   if (!match) {
     const sessions = listSessions();
     const names = sessions.map((s) => s.name).join(", ");
-    return `No session matching "${query}".\nAvailable: ${names}`;
+    return `未找到匹配「${query}」的会话。\n可用: ${names}`;
   }
 
   ctx.router.setActiveSession(userId, match.id);
   ctx.watcherManager?.setBoundSession(match.id);
+  ctx.onBoundSessionChanged?.(match.id);
   return `✓ 已切换到 [${match.name}]\n后续消息和 AI 回复将只通过此会话收发。`;
 });
 
 register("sessions", "列出所有会话及状态", async (_args, ctx, _client, userId) => {
   const sessions = listSessions();
   if (sessions.length === 0) {
-    return "No active sessions.";
+    return "当前没有活跃会话。请先在 Cursor 中启动一个 Composer 对话。";
   }
 
-  const currentId = ctx.router?.getActiveSession(userId);
   const boundId = ctx.watcherManager?.getBoundSessionId();
-  const watchedIds = ctx.watcherManager?.getWatchedSessionIds() ?? [];
-  const lines = ["--- Sessions ---"];
+  const hasBound = boundId && sessions.some(s => s.id === boundId);
+  const lines = ["--- 会话列表 ---"];
 
   for (const s of sessions) {
-    const isCurrent = s.id === currentId;
     const isBound = s.id === boundId;
-    const isWatched = watchedIds.includes(s.id);
+    const shortId = s.id.slice(0, 8);
     const age = formatDuration(Date.now() - s.lastActiveAt);
-    const markers: string[] = [];
-    if (isCurrent) markers.push("current");
-    if (isBound) markers.push("bound");
-    if (isWatched) markers.push("watched");
-    const suffix = markers.length > 0 ? ` [${markers.join(", ")}]` : "";
-    lines.push(`• ${s.name} — ${age} ago${suffix}`);
+    const marker = isBound ? " ← 已绑定" : "";
+    lines.push(`• ${s.name} (${shortId}) — ${age} 前${marker}`);
   }
 
-  lines.push("\nUse /use <name> to switch session.");
+  if (!hasBound) {
+    lines.push("\n⚠ 当前未绑定活跃会话，请复制发送:");
+  } else {
+    lines.push("\n切换会话:");
+  }
+  for (const s of sessions) {
+    lines.push(`/use ${s.name}`);
+  }
   return lines.join("\n");
 });
 
 register("session", "查看当前会话详情", async (_args, ctx, _client, userId) => {
   const sessions = listSessions();
   if (sessions.length === 0) {
-    return "No active MultiSession sessions.";
+    return "当前没有活跃的会话。请先在 Cursor 中启动一个 Composer 对话。";
   }
-  const currentId = ctx.router?.getActiveSession(userId);
-  const lines = ["--- MultiSession ---"];
+  const boundId = ctx.watcherManager?.getBoundSessionId();
+  const hasBound = boundId && sessions.some(s => s.id === boundId);
+  const lines = ["--- 会话详情 ---"];
   for (const s of sessions) {
+    const isBound = s.id === boundId;
     const age = formatDuration(Date.now() - s.lastActiveAt);
-    const marker = s.id === currentId ? " ← current" : "";
-    lines.push(`• ${s.name} (${s.id.slice(0, 8)}) — last active ${age} ago${marker}`);
+    const marker = isBound ? " ← 已绑定" : "";
+    lines.push(`• ${s.name} (${s.id.slice(0, 8)}) — ${age} 前${marker}`);
   }
-  lines.push("\nUse /use <name> to switch session.");
-  lines.push("Use /rename <new name> to rename the current session.");
+  if (!hasBound) {
+    lines.push("\n⚠ 当前未绑定活跃会话，请复制发送:");
+    for (const s of sessions) {
+      lines.push(`/use ${s.name}`);
+    }
+  } else {
+    lines.push("\n/use <名称> 切换会话");
+    lines.push("/rename <新名称> 重命名当前会话");
+  }
   return lines.join("\n");
 });
 
 register("rename", "重命名当前会话", async (args, ctx, _client, userId) => {
   const newName = args.trim();
   if (!newName) {
-    return "Usage: /rename <new name>\nExample: /rename my-project";
+    return "用法: /rename <新名称>\n示例: /rename 我的项目";
   }
 
   const activeId = ctx.router?.getActiveSession(userId);
   if (!activeId) {
-    return "No active session to rename. Use /use <name> first.";
+    const sessions = listSessions();
+    if (sessions.length === 0) {
+      return "当前没有活跃会话。请先在 Cursor 中启动一个 Composer 对话。";
+    }
+    const cmds = sessions.map(s => `/use ${s.name}`).join("\n");
+    return `当前未绑定活跃会话，请先切换:\n${cmds}`;
   }
 
   try {
@@ -193,16 +214,16 @@ register("rename", "重命名当前会话", async (args, ctx, _client, userId) =
 
     const target = sessions.find((s) => s.id === activeId);
     if (!target) {
-      return `Session ${activeId} not found in sessions.json.`;
+      return `会话 ${activeId} 未找到。`;
     }
 
     const oldName = target.name;
     target.name = newName;
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, "\t"), "utf-8");
 
-    return `Session renamed: "${oldName}" → "${newName}"`;
+    return `会话已重命名: 「${oldName}」→「${newName}」`;
   } catch (err) {
-    return `Failed to rename: ${err instanceof Error ? err.message : String(err)}`;
+    return `重命名失败: ${err instanceof Error ? err.message : String(err)}`;
   }
 });
 
@@ -246,7 +267,7 @@ export async function tryHandleSlashCommand(
     logger.error({ command: cmdName, err: String(err) }, "slash command error");
     try {
       const contextToken = loadContextToken(userId);
-      await client.sendText(userId, `Command /${cmdName} failed: ${err instanceof Error ? err.message : String(err)}`, contextToken);
+      await client.sendText(userId, `命令 /${cmdName} 执行失败: ${err instanceof Error ? err.message : String(err)}`, contextToken);
     } catch {
       // best effort
     }

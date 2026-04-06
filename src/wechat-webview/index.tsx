@@ -46,8 +46,8 @@ function AccountCard({ account, sessions, allAccounts }: { account: AccountInfo;
 		if (confirm('确定删除?')) post('removeAccount', { accountId: id });
 	}, [id]);
 
-	const boundByOther = useCallback((sessionId: string) => {
-		return allAccounts.some(a => a.id !== id && a.bindingSessions.includes(sessionId));
+	const getOtherBoundAccount = useCallback((sessionId: string): AccountInfo | undefined => {
+		return allAccounts.find(a => a.id !== id && a.bindingSessions.includes(sessionId));
 	}, [id, allAccounts]);
 
 	return (
@@ -92,23 +92,44 @@ function AccountCard({ account, sessions, allAccounts }: { account: AccountInfo;
 			</div>
 			{showBindings && (
 				<div className="binding-section">
-					<div className="binding-title">Session 绑定</div>
+					<div className="binding-title">SESSION 绑定</div>
 					{sessions.length === 0 ? (
 						<p className="binding-empty">暂无可用 Session</p>
 					) : (
 						<div className="binding-list">
 							{sessions.map(s => {
 								const bound = bindingSessions.includes(s.id);
-								const otherBound = boundByOther(s.id);
+								const otherAccount = getOtherBoundAccount(s.id);
+								const hasBound = bindingSessions.length > 0;
+								const canBind = s.alive && !(otherAccount && !bound);
 								return (
-									<label key={s.id} className={`binding-item${otherBound && !bound ? ' disabled' : ''}`}>
+									<label key={s.id} className={`binding-item${!canBind && !bound ? ' disabled' : ''}${otherAccount && !bound ? ' other-bound' : ''}`}>
 										<input
-											type="checkbox"
+											type="radio"
+											name={`binding-${id}`}
 											checked={bound}
-											disabled={otherBound && !bound}
+											disabled={!s.alive && !bound}
 											onChange={() => {
 												if (bound) {
 													post('unbindSession', { accountId: id, sessionId: s.id });
+												} else if (!s.alive) {
+													return;
+												} else if (otherAccount) {
+													post('confirmBindSteal', {
+														accountId: id,
+														sessionId: s.id,
+														sessionName: s.name || s.id.substring(0, 8),
+														otherAccountId: otherAccount.id,
+														otherAccountName: otherAccount.name,
+														currentSessionId: hasBound ? bindingSessions[0] : null,
+													});
+												} else if (hasBound) {
+													post('confirmBindSwitch', {
+														accountId: id,
+														sessionId: s.id,
+														sessionName: s.name || s.id.substring(0, 8),
+														currentSessionId: bindingSessions[0],
+													});
 												} else {
 													post('bindSession', { accountId: id, sessionId: s.id });
 												}
@@ -116,13 +137,13 @@ function AccountCard({ account, sessions, allAccounts }: { account: AccountInfo;
 										/>
 										<span className="binding-name">{s.name || s.id.substring(0, 8)}</span>
 										{!s.alive && <span className="binding-tag inactive">已关闭</span>}
-										{otherBound && !bound && <span className="binding-tag other">已绑定其他</span>}
+										{otherAccount && !bound && <span className="binding-tag other">已绑定 {otherAccount.name}</span>}
 									</label>
 								);
 							})}
 						</div>
 					)}
-					<p className="binding-hint">未绑定的 Session 将通过主渠道发送</p>
+					<p className="binding-hint">仅绑定的会话会收发微信消息，可通过微信 /use 命令切换</p>
 				</div>
 			)}
 		</div>

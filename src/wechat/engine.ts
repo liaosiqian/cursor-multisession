@@ -44,6 +44,7 @@ export interface EngineEvents {
   replyPending: [];
   replySent: [text: string];
   error: [err: Error];
+  boundSessionChanged: [sessionId: string | null];
 }
 
 const WECHAT_ACTION_DIR = path.join(os.homedir(), '.multisession', 'wechat-actions');
@@ -295,6 +296,9 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
             pendingReply: this.pendingReply,
             router: this.router,
             watcherManager: this.watcherManager,
+            onBoundSessionChanged: (sessionId) => {
+              this.emit("boundSessionChanged", sessionId);
+            },
           };
           const handled = await tryHandleSlashCommand(
             extracted.text,
@@ -358,14 +362,16 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
           } else {
             const ctx = loadContextToken(msg.from_user_id);
             const alive = listSessions();
-            let hint: string;
             if (alive.length === 0) {
-              hint = "当前没有活跃的会话。请先在 Cursor 中启动一个 Composer 对话。";
+              await this.client.sendText(msg.from_user_id,
+                "当前没有活跃的会话。请先在 Cursor 中启动一个 Composer 对话。", ctx);
             } else {
-              const names = alive.map(s => `  • ${s.name}`).join("\n");
-              hint = `当前未绑定任何会话。\n\n可用会话：\n${names}\n\n请发送 /use <名称> 切换，例如：/use ${alive[0].name}`;
+              const lines = ["当前未绑定活跃会话，请复制发送以下指令切换：", ""];
+              for (const s of alive) {
+                lines.push(`/use ${s.name}`);
+              }
+              await this.client.sendText(msg.from_user_id, lines.join("\n"), ctx);
             }
-            await this.client.sendText(msg.from_user_id, hint, ctx);
           }
         } catch (err) {
           logger.error({ err: String(err) }, "message handler error");

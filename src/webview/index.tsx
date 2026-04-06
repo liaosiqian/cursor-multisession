@@ -542,6 +542,8 @@ function App() {
 							<button className="dropdown-item dropdown-item-danger" onClick={() => { vscode.postMessage({ type: 'uninstallMcp' }); setSettingsOpen(false); }}>
 								卸载 MCP 配置
 							</button>
+							<div className="dropdown-divider" />
+							<div className="dropdown-version">v{extVersion}</div>
 						</div>
 					)}
 				</div>
