@@ -6,25 +6,30 @@ const os = require('os');
 const srcRoot = path.join(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(srcRoot, 'package.json'), 'utf-8'));
 const version = pkg.version;
-const name = `${pkg.publisher}.${pkg.name}-${version}`;
+const FIXED_DIR_NAME = `${pkg.publisher}.${pkg.name}`;
 const extParent = path.join(os.homedir(), '.cursor', 'extensions');
-const extDir = path.join(extParent, name);
+const extDir = path.join(extParent, FIXED_DIR_NAME);
 
 console.log(`\n  MultiSession Deploy v${version}`);
 console.log(`  ${'─'.repeat(40)}`);
 
-// 1. remove ALL old versions to force clean install
+// 1. remove old versioned dirs (migration) + clean current fixed dir
 for (const entry of fs.readdirSync(extParent)) {
   if (entry.startsWith(`${pkg.publisher}.${pkg.name}-`)) {
     const old = path.join(extParent, entry);
     fs.rmSync(old, { recursive: true, force: true });
-    console.log(`  [clean] removed ${entry}`);
+    console.log(`  [clean] removed ${entry} (old versioned dir)`);
   }
+}
+if (fs.existsSync(extDir)) {
+  fs.rmSync(extDir, { recursive: true, force: true });
+  console.log(`  [clean] refreshed ${FIXED_DIR_NAME}`);
 }
 
 // 2. create fresh target dirs
 fs.mkdirSync(path.join(extDir, 'dist'), { recursive: true });
 fs.mkdirSync(path.join(extDir, 'media'), { recursive: true });
+fs.mkdirSync(path.join(extDir, 'scripts'), { recursive: true });
 
 // 3. copy files
 const filesToCopy = [
@@ -37,6 +42,7 @@ const filesToCopy = [
   'dist/mcp-server.mjs',
   'package.json',
   'media/icon.svg',
+  'scripts/get-cursor-wid',
 ];
 
 let allOk = true;
@@ -82,6 +88,6 @@ if (!allOk) {
   process.exit(1);
 }
 
-console.log(`\n  Deploy OK: ${name}`);
+console.log(`\n  Deploy OK: ${FIXED_DIR_NAME} (v${version})`);
 console.log(`  -> ${extDir}`);
 console.log(`\n  Next: Cmd+Shift+P -> "Reload Window"\n`);
