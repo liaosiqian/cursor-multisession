@@ -43,6 +43,7 @@ const filesToCopy = [
   'package.json',
   'media/icon.svg',
   'scripts/get-cursor-wid',
+  'scripts/capture-cursor',
 ];
 
 let allOk = true;

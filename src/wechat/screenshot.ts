@@ -19,8 +19,23 @@ async function captureRaw(): Promise<string> {
   const platform = os.platform();
 
   if (platform === "darwin") {
-    await execAsync(`screencapture -x "${filePath}"`);
-    logger.info("captured current screen");
+    const captureTool = path.join(__dirname, "..", "scripts", "capture-cursor");
+    let captured = false;
+    if (fs.existsSync(captureTool)) {
+      try {
+        const { stdout } = await execAsync(`"${captureTool}" "${filePath}"`);
+        if (fs.existsSync(filePath) && fs.statSync(filePath).size > 1000) {
+          captured = true;
+          logger.info({ output: stdout.trim() }, "captured Cursor window via ScreenCaptureKit");
+        }
+      } catch (err) {
+        logger.warn({ err: String(err) }, "ScreenCaptureKit capture failed, falling back to screencapture");
+      }
+    }
+    if (!captured) {
+      await execAsync(`screencapture -x "${filePath}"`);
+      logger.info("captured full screen (fallback)");
+    }
   } else if (platform === "win32") {
     const ps = `
       Add-Type -AssemblyName System.Windows.Forms
