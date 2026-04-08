@@ -941,7 +941,9 @@ body {
 
 .input-textarea {
 	width: 100%;
-	resize: none;
+	resize: vertical;
+	min-height: 60px;
+	max-height: 200px;
 	background: var(--input-bg);
 	color: var(--fg);
 	border: 1px solid var(--input-border);

@@ -280,37 +280,35 @@ server.tool(
 			const queue = readJson<any[]>(queuePath);
 			if (queue && queue.length > 0) {
 				const urgentIdx = queue.findIndex((m: any) => m.urgent);
-				let toDeliver: any[];
+				let picked: any;
 				let remaining: any[];
 
 				if (urgentIdx >= 0) {
-					toDeliver = [queue[urgentIdx]];
+					picked = queue[urgentIdx];
 					remaining = [...queue.slice(0, urgentIdx), ...queue.slice(urgentIdx + 1)];
 				} else {
-					toDeliver = queue;
-					remaining = [];
+					picked = queue[0];
+					remaining = queue.slice(1);
 				}
 
 				writeJson(queuePath, remaining);
 
 				const logPath = path.join(getSessionDir(sid), 'chat-log.json');
 				const logs = readJson<any[]>(logPath) || [];
-				for (const msg of toDeliver) {
-					logs.push({ role: 'user', text: msg.content || msg.text, ts: msg.timestamp || Date.now() });
-				}
+				logs.push({ role: 'user', text: picked.content || picked.text, ts: picked.timestamp || Date.now() });
 				writeJson(logPath, logs);
 
 				touchSession(sid);
-				log(`[poll] ${sid} consumed ${toDeliver.length} messages (${remaining.length} remaining)`);
+				log(`[poll] ${sid} consumed 1 message (${remaining.length} remaining)`);
 
-				const texts = toDeliver.map((m: any) => m.content || m.text).join('\n---\n');
+				const text = picked.content || picked.text;
 				const pendingNote = remaining.length > 0
 					? `\n（队列中还有 ${remaining.length} 条待处理消息，处理完本条后会继续投递）`
 					: '';
 				return {
 					content: [{
 						type: 'text' as const,
-						text: `[session_id: ${sid}]\n\n${texts}${pendingNote}${ENFORCE_SUFFIX(sid)}`,
+						text: `[session_id: ${sid}]\n\n${text}${pendingNote}${ENFORCE_SUFFIX(sid)}`,
 					}],
 				};
 			}

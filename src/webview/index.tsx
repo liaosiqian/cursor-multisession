@@ -305,32 +305,52 @@ function App() {
 	const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
 		const val = e.target.value;
 		setInputText(val);
-		if (val === '/') {
+
+		const cursor = e.target.selectionStart ?? val.length;
+		const beforeCursor = val.slice(0, cursor);
+		const lastSlash = beforeCursor.lastIndexOf('/');
+		const lastAt = beforeCursor.lastIndexOf('@');
+
+		const isSlashTrigger = lastSlash >= 0
+			&& (lastSlash === 0 || /\s/.test(beforeCursor[lastSlash - 1]))
+			&& !beforeCursor.slice(lastSlash + 1).includes(' ');
+		const isAtTrigger = lastAt >= 0
+			&& (lastAt === 0 || /\s/.test(beforeCursor[lastAt - 1]))
+			&& !beforeCursor.slice(lastAt + 1).includes(' ');
+
+		if (isSlashTrigger) {
 			vscode.postMessage({ type: 'requestSkills' });
-		} else if (val === '@') {
+		} else if (isAtTrigger) {
 			vscode.postMessage({ type: 'requestHistory' });
 			vscode.postMessage({ type: 'requestOpenFiles' });
-		} else if (!val.startsWith('/') && !val.startsWith('@')) {
+		} else {
 			setAcMode(null);
 			setAcItems([]);
 		}
 		setAcIndex(0);
 	}, []);
 
+	const acQuery = useMemo(() => {
+		const trigger = acMode === 'skill' ? '/' : acMode === 'history' ? '@' : null;
+		if (!trigger) return '';
+		const lastIdx = inputText.lastIndexOf(trigger);
+		if (lastIdx < 0) return '';
+		const after = inputText.slice(lastIdx + 1);
+		return after.includes(' ') ? '' : after.toLowerCase();
+	}, [acMode, inputText]);
+
 	const filteredAcItems = useMemo(() => {
 		if (!acMode || acItems.length === 0) return [];
-		if (acMode === 'skill' && inputText.startsWith('/')) {
-			const q = inputText.slice(1).toLowerCase();
-			if (!q) return acItems;
-			return acItems.filter(i => i.label.toLowerCase().includes(q));
+		if (acMode === 'skill') {
+			if (!acQuery) return acItems;
+			return acItems.filter(i => i.label.toLowerCase().includes(acQuery));
 		}
-		if (acMode === 'history' && inputText.startsWith('@')) {
-			const q = inputText.slice(1).toLowerCase();
-			if (!q) return acItems;
-			return acItems.filter(i => i.label.toLowerCase().includes(q) || (i.desc || '').toLowerCase().includes(q));
+		if (acMode === 'history') {
+			if (!acQuery) return acItems;
+			return acItems.filter(i => i.label.toLowerCase().includes(acQuery) || (i.desc || '').toLowerCase().includes(acQuery));
 		}
 		return acItems;
-	}, [acMode, acItems, inputText]);
+	}, [acMode, acItems, acQuery]);
 
 	const selectAcItem = useCallback((item: { id: string; label: string }) => {
 		if (acMode === 'skill') {
@@ -341,7 +361,9 @@ function App() {
 		} else if (acMode === 'history') {
 			setSharedFiles(prev => [...prev, { path: `@history:${item.id}`, name: `chat: ${item.label}` }]);
 		}
-		setInputText('');
+		const trigger = acMode === 'skill' ? '/' : '@';
+		const lastIdx = inputText.lastIndexOf(trigger);
+		setInputText(lastIdx > 0 ? inputText.slice(0, lastIdx).trimEnd() : '');
 		setAcMode(null);
 		setAcItems([]);
 		setTimeout(() => textareaRef.current?.focus(), 50);
@@ -935,7 +957,7 @@ function App() {
 						onKeyDown={handleKeyDown}
 						onPaste={handlePaste}
 						placeholder="输入消息... (Enter 发送, / Skills, @ History)"
-						rows={2}
+						rows={4}
 					/>
 				</div>
 				<button

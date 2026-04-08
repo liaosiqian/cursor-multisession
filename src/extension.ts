@@ -198,14 +198,10 @@ function expandReferences(text: string): string {
 			const skills = scanSkillDirs();
 			const target = skills.find(s => s.name === skillName);
 			if (!target) return `[skill: ${skillName} — not found]`;
-			try {
-				const content = fs.readFileSync(target.skillPath, 'utf-8');
-				skillBlocks.push(
-					`Skill Name: ${skillName}\n` +
-					`Path: ${target.skillPath}\n` +
-					`SKILL.md content:\n${content}`
-				);
-			} catch { return `[skill: ${skillName} — read error]`; }
+			skillBlocks.push(
+				`Skill: ${skillName}\n` +
+				`Path: ${target.skillPath}`
+			);
 			return '';
 		})
 		.replace(/\[file: @history:([^\]]+)\]/g, (_match, composerId: string) => {
@@ -231,24 +227,23 @@ function expandReferences(text: string): string {
 
 	if (skillBlocks.length > 0) {
 		parts.push(
-			'<manually_attached_skills>\n' +
-			'The user has manually attached the following skills to their message.\n' +
-			'These skills contain specific instructions or workflows that you should follow for this request.\n\n' +
-			skillBlocks.join('\n\n---\n\n') +
-			'\n</manually_attached_skills>'
+			'[附加 Skill] 请用 Read 工具读取以下 SKILL.md 文件，然后按其中的指引执行：\n\n' +
+			skillBlocks.join('\n\n---\n\n')
 		);
 	}
 
 	if (historyBlocks.length > 0) {
 		parts.push(
-			'<referenced_chats>\n' +
-			'The user has referenced the following past conversations for context.\n\n' +
-			historyBlocks.join('\n\n---\n\n') +
-			'\n</referenced_chats>'
+			'[引用历史对话] 以下是用户引用的历史对话上下文：\n\n' +
+			historyBlocks.join('\n\n---\n\n')
 		);
 	}
 
-	if (cleaned) parts.push(cleaned);
+	if (cleaned) {
+		parts.push(cleaned);
+	} else if (parts.length > 0) {
+		parts.push('请参考以上引用内容，告诉我你的理解或继续相关工作。');
+	}
 	return parts.join('\n\n');
 }
 
@@ -649,7 +644,9 @@ function installMcpConfig(ctx: vscode.ExtensionContext): 'installed' | 'already'
 	const hooksConfig = readJson<any>(hooksPath) || { version: 1, hooks: {} };
 	const desiredHookCommand = `.cursor/hooks/multisession-check-queue.sh`;
 	const existingMcpHooks: any[] = hooksConfig.hooks?.beforeMCPExecution || [];
-	const hookConfigMatch = existingMcpHooks.some((h: any) => h.command === desiredHookCommand);
+	const existingShellHooks: any[] = hooksConfig.hooks?.beforeShellExecution || [];
+	const hookConfigMatch = existingMcpHooks.some((h: any) => h.command === desiredHookCommand)
+		&& existingShellHooks.some((h: any) => h.command === desiredHookCommand);
 
 	let duplicatesCleaned = false;
 	for (const ws of wsPaths.slice(1)) {
@@ -690,12 +687,15 @@ function installMcpConfig(ctx: vscode.ExtensionContext): 'installed' | 'already'
 	if (!hookConfigMatch) {
 		hooksConfig.version = hooksConfig.version || 1;
 		hooksConfig.hooks = hooksConfig.hooks || {};
-		hooksConfig.hooks.beforeMCPExecution = hooksConfig.hooks.beforeMCPExecution || [];
-		const filtered = hooksConfig.hooks.beforeMCPExecution.filter(
-			(h: any) => h.command !== desiredHookCommand
-		);
-		filtered.push({ command: desiredHookCommand });
-		hooksConfig.hooks.beforeMCPExecution = filtered;
+
+		for (const event of ['beforeMCPExecution', 'beforeShellExecution'] as const) {
+			hooksConfig.hooks[event] = hooksConfig.hooks[event] || [];
+			const filtered = hooksConfig.hooks[event].filter(
+				(h: any) => h.command !== desiredHookCommand
+			);
+			filtered.push({ command: desiredHookCommand });
+			hooksConfig.hooks[event] = filtered;
+		}
 		writeJson(hooksPath, hooksConfig);
 	}
 
@@ -726,18 +726,24 @@ function uninstallMcpConfig(): number {
 		const hookScriptPath = getHookScriptPath(ws);
 		try { fs.unlinkSync(hookScriptPath); } catch { /* ignore */ }
 
-		// remove hook entry from hooks.json
+		// remove hook entries from hooks.json (both beforeMCPExecution and beforeShellExecution)
 		const hooksPath = getHooksConfigPath(ws);
 		const hooksConfig = readJson<any>(hooksPath);
-		if (hooksConfig?.hooks?.beforeMCPExecution) {
-			const before = hooksConfig.hooks.beforeMCPExecution.length;
-			hooksConfig.hooks.beforeMCPExecution = hooksConfig.hooks.beforeMCPExecution.filter(
-				(h: any) => h.command !== hookCommand
-			);
-			if (hooksConfig.hooks.beforeMCPExecution.length === 0) {
-				delete hooksConfig.hooks.beforeMCPExecution;
+		if (hooksConfig?.hooks) {
+			let hooksChanged = false;
+			for (const event of ['beforeMCPExecution', 'beforeShellExecution']) {
+				const arr: any[] = hooksConfig.hooks[event];
+				if (!arr) continue;
+				const before = arr.length;
+				hooksConfig.hooks[event] = arr.filter((h: any) => h.command !== hookCommand);
+				if (hooksConfig.hooks[event].length === 0) {
+					delete hooksConfig.hooks[event];
+				}
+				if ((hooksConfig.hooks[event]?.length ?? 0) !== before) {
+					hooksChanged = true;
+				}
 			}
-			if (hooksConfig.hooks.beforeMCPExecution?.length !== before) {
+			if (hooksChanged) {
 				if (Object.keys(hooksConfig.hooks).length === 0) {
 					try { fs.unlinkSync(hooksPath); } catch { /* ignore */ }
 				} else {
