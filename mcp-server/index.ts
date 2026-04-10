@@ -10,12 +10,16 @@ const SESSIONS_FILE = path.join(DATA_ROOT, 'sessions.json');
 const SESSIONS_DIR = path.join(DATA_ROOT, 'sessions');
 const ACTIVE_WINDOW_FILE = path.join(DATA_ROOT, 'active-window.json');
 const LOG_FILE = path.join(DATA_ROOT, 'multisession.log');
+function reconnectPendingFile(workspace: string): string {
+	const hash = Buffer.from(workspace).toString('base64url').slice(0, 16);
+	return path.join(DATA_ROOT, `reconnect-pending-${hash}.json`);
+}
 
 const POLL_INTERVAL_MS = 800;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const ORPHAN_THRESHOLD_MS = 30_000;
 const SESSION_EXPIRE_DAYS = 7;
-const MAX_POLL_DURATION_MS = 25 * 60 * 1000; // 25 min (under 30 min timeout)
+const MAX_POLL_DURATION_MS = 4 * 60 * 60 * 1000; // 4 hours — return still_waiting to keep loop alive
 
 // ── helpers ──
 
@@ -53,7 +57,6 @@ interface SessionMeta {
 	name: string;
 	workspace: string;
 	windowToken?: string;
-	composerToken?: string;
 	alive: boolean;
 	createdAt: number;
 	lastActiveAt: number;
@@ -94,32 +97,12 @@ function getActiveWindowToken(workspace: string): string | null {
 
 // ── orphan / session recovery ──
 
-function tryAdoptOrphan(workspace: string, windowToken: string | null, composerToken: string | null): string | null {
+function tryAdoptOrphan(workspace: string, windowToken: string | null): string | null {
 	const sessions = readSessions();
 	const now = Date.now();
 
-	// Phase 0: exact composerToken match — search ALL sessions (alive or dead) in this workspace
-	if (composerToken) {
-		const allWsSessions = sessions.filter(s => s.workspace === workspace);
-		const composerMatch = allWsSessions.find(s => s.composerToken === composerToken);
-		if (composerMatch) {
-			if (!composerMatch.alive) {
-				composerMatch.alive = true;
-				writeSessions(sessions);
-				log(`[adopt] revived dead session ${composerMatch.id} (composerToken match, age=${now - composerMatch.lastActiveAt}ms)`);
-			} else {
-				log(`[adopt] recovered session ${composerMatch.id} (composerToken match, age=${now - composerMatch.lastActiveAt}ms)`);
-			}
-			return composerMatch.id;
-		}
-		log(`[adopt] new composerToken ${composerToken}, skipping adoption`);
-		return null;
-	}
-
 	const wsSessions = sessions.filter(s => s.alive && s.workspace === workspace);
 	if (wsSessions.length === 0) return null;
-
-	// Below: legacy path when composerToken is not provided (backward compat)
 
 	// Phase 1: exact windowToken match (handles mode-switch / reconnect — no time threshold)
 	if (windowToken) {
@@ -171,6 +154,34 @@ function cleanupExpiredSessions() {
 	}
 }
 
+// ── reconnect-pending ──
+
+const RECONNECT_PENDING_MAX_AGE_MS = 60_000;
+
+function tryConsumeReconnectPending(workspace: string): string | null {
+	const pendingFile = reconnectPendingFile(workspace);
+	const data = readJson<{ targetSessionId: string; ts: number }>(pendingFile);
+	if (!data || !data.targetSessionId) return null;
+	if (Date.now() - data.ts > RECONNECT_PENDING_MAX_AGE_MS) {
+		try { fs.unlinkSync(pendingFile); } catch { /* ignore */ }
+		return null;
+	}
+
+	const sessions = readSessions();
+	const target = sessions.find(s => s.id === data.targetSessionId);
+	if (!target) {
+		try { fs.unlinkSync(pendingFile); } catch { /* ignore */ }
+		return null;
+	}
+
+	target.alive = true;
+	target.lastActiveAt = Date.now();
+	writeSessions(sessions);
+	try { fs.unlinkSync(pendingFile); } catch { /* ignore */ }
+	log(`[reconnect] consumed pending reconnect → session ${data.targetSessionId}`);
+	return data.targetSessionId;
+}
+
 // ── default queue migration ──
 
 function migrateDefaultQueue(sid: string) {
@@ -202,30 +213,26 @@ server.tool(
 	{
 		session_id: z.string().optional().describe('会话 ID。首次调用不传，后续必须携带。'),
 		reply: z.string().optional().describe('本轮回复的摘要/结论（Markdown），会在插件界面弹窗展示给用户。无需总结时可省略。'),
-		composer_token: z.string().optional().describe('Composer 标识。从通信规则中获取，用于区分不同的 Composer 对话。首次调用时携带，后续可省略。'),
 	},
 	async (args, extra) => {
 		const cwd = process.cwd();
 		const windowToken = getActiveWindowToken(cwd);
 		let sid = args.session_id as string | undefined;
 		const reply = args.reply as string | undefined;
-		const composerToken = args.composer_token as string | undefined;
 
-		// first call: try adopt or register
+		// first call: try reconnect-pending, then adopt or register
 		let isRecovered = false;
 		if (!sid) {
-			sid = tryAdoptOrphan(cwd, windowToken, composerToken || null) ?? undefined;
+			sid = tryConsumeReconnectPending(cwd) ?? undefined;
 			if (sid) {
 				isRecovered = true;
-				// update composerToken on the recovered session if provided
-				if (composerToken) {
-					const sessions = readSessions();
-					const s = sessions.find(x => x.id === sid);
-					if (s && s.composerToken !== composerToken) {
-						s.composerToken = composerToken;
-						writeSessions(sessions);
-					}
-				}
+				log(`[check_messages] reconnect-pending matched session ${sid}`);
+			}
+		}
+		if (!sid) {
+			sid = tryAdoptOrphan(cwd, windowToken) ?? undefined;
+			if (sid) {
+				isRecovered = true;
 			} else {
 				sid = genId();
 				const sessions = readSessions();
@@ -236,7 +243,6 @@ server.tool(
 					name: `${wsName} #${num}`,
 					workspace: cwd,
 					windowToken: windowToken || undefined,
-					composerToken: composerToken || undefined,
 					alive: true,
 					createdAt: Date.now(),
 					lastActiveAt: Date.now(),
@@ -244,7 +250,7 @@ server.tool(
 				sessions.push(meta);
 				writeSessions(sessions);
 				ensureDir(getSessionDir(sid));
-				log(`[register] new session ${sid} for ${cwd}${composerToken ? ` (composer=${composerToken})` : ''}`);
+				log(`[register] new session ${sid} for ${cwd}`);
 			}
 			migrateDefaultQueue(sid);
 			cleanupExpiredSessions();
@@ -320,6 +326,28 @@ server.tool(
 				};
 			}
 
+			// check reconnect-pending: if user requested reconnect to a different session, redirect Agent
+			const pendingFile = reconnectPendingFile(cwd);
+			const reconnectTarget = readJson<{ targetSessionId: string; ts: number }>(pendingFile);
+			if (reconnectTarget
+				&& reconnectTarget.targetSessionId
+				&& reconnectTarget.targetSessionId !== sid
+				&& (Date.now() - reconnectTarget.ts) < RECONNECT_PENDING_MAX_AGE_MS
+			) {
+				const targetExists = readSessions().some(s => s.id === reconnectTarget.targetSessionId);
+				if (targetExists) {
+					try { fs.unlinkSync(pendingFile); } catch { /* ignore */ }
+					touchSession(sid);
+					log(`[reconnect] redirecting Agent from ${sid} to ${reconnectTarget.targetSessionId}`);
+					return {
+						content: [{
+							type: 'text' as const,
+							text: `[session_id: ${reconnectTarget.targetSessionId}]\n\n会话已切换。请立即调用 check_messages(session_id="${reconnectTarget.targetSessionId}") 继续。${ENFORCE_SUFFIX(reconnectTarget.targetSessionId)}`,
+						}],
+					};
+				}
+			}
+
 			// heartbeat
 			if (Date.now() >= nextHeartbeat) {
 				touchSession(sid);
@@ -342,14 +370,14 @@ server.tool(
 			await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
 		}
 
-		// timeout
-		touchSession(sid);
-		return {
-			content: [{
-				type: 'text' as const,
-				text: `[session_id: ${sid}]\n\n轮询超时（25 分钟）。${ENFORCE_SUFFIX(sid)}`,
-			}],
-		};
+	// still_waiting — keep the loop alive without breaking the session
+	touchSession(sid);
+	return {
+		content: [{
+			type: 'text' as const,
+			text: `[session_id: ${sid}]\n\n{"status":"still_waiting"}\n暂无新消息。请立刻再次调用 check_messages(session_id="${sid}") 保持连接，不要输出任何文字。`,
+		}],
+	};
 	}
 );
 

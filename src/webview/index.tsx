@@ -95,6 +95,7 @@ function App() {
 	const [acIndex, setAcIndex] = useState(0);
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [keepAlive, setKeepAlive] = useState(false);
+	const [undeliveredSessions, setUndeliveredSessions] = useState<Set<string>>(new Set());
 	const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
 	const lastUserActivityRef = useRef(Date.now());
 	const settingsRef = useRef<HTMLDivElement>(null);
@@ -209,9 +210,17 @@ function App() {
 				case 'syncLogs':
 					setLogsMap(prev => ({ ...prev, [msg.sessionId]: msg.data }));
 					break;
-				case 'pendingCount':
-					setPendingMap(prev => ({ ...prev, [msg.sessionId]: msg.items || [] }));
-					break;
+			case 'pendingCount':
+				setPendingMap(prev => ({ ...prev, [msg.sessionId]: msg.items || [] }));
+				if (!msg.items || msg.items.length === 0) {
+					setUndeliveredSessions(prev => {
+						if (!prev.has(msg.sessionId)) return prev;
+						const next = new Set(prev);
+						next.delete(msg.sessionId);
+						return next;
+					});
+				}
+				break;
 				case 'mcpConfigured':
 					setMcpConfigured(msg.data);
 					break;
@@ -273,9 +282,12 @@ function App() {
 					setAcIndex(0);
 				}
 				break;
-			case 'extensionInfo':
-				if (msg.version) setExtVersion(msg.version);
-				break;
+		case 'extensionInfo':
+			if (msg.version) setExtVersion(msg.version);
+			break;
+		case 'messageNotDelivered':
+			setUndeliveredSessions(prev => new Set(prev).add(msg.sessionId));
+			break;
 			}
 		};
 		window.addEventListener('message', handler);
@@ -449,8 +461,8 @@ function App() {
 	}, [handleSend, acMode, filteredAcItems, acIndex, selectAcItem]);
 
 	const handleReconnect = useCallback(() => {
-		vscode.postMessage({ type: 'reconnect' });
-	}, []);
+		vscode.postMessage({ type: 'reconnect', sessionId: activeSessionId || 'default' });
+	}, [activeSessionId]);
 
 	const handleCopyRule = useCallback(() => {
 		vscode.postMessage({ type: 'copyRule' });
@@ -793,9 +805,18 @@ function App() {
 				</div>
 			</div>
 		))}
-				{currentPending.length > 0 && (
-					<div className="pending-section">
-						<div className="pending-label">待处理 ({currentPending.length})</div>
+			{undeliveredSessions.has(activeSessionId) && currentPending.length > 0 && (
+				<div className="delivery-warning">
+					<span>AI 可能已断开连接，消息未被消费</span>
+					<button className="btn-small btn-accent" onClick={() => {
+						vscode.postMessage({ type: 'reconnect', sessionId: activeSessionId });
+						setUndeliveredSessions(prev => { const n = new Set(prev); n.delete(activeSessionId); return n; });
+					}}>重连</button>
+				</div>
+			)}
+			{currentPending.length > 0 && (
+				<div className="pending-section">
+					<div className="pending-label">待处理 ({currentPending.length})</div>
 						{currentPending.map(item => (
 							<div key={item.id} className={`message message-pending${item.urgent ? ' message-urgent' : ''}`}>
 								{editingPendingId === item.id ? (

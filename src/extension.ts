@@ -21,34 +21,20 @@ let IS_DEV = false;
 
 // ── 通信规则提示词（粘贴到 Composer 用） ──
 
-function generateComposerToken(): string {
-	return `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 function generateRulePrompt(): string {
-	const token = generateComposerToken();
 	return `你好，请遵循以下 MCP 工具调用规则。
 
 # MCP 工具调用规则
 
-**本对话的 composer_token: \`${token}\`**
-
 1. 每轮对话回复**完整输出后**，最后一步必须调用 \`check_messages\`，适用于 Agent/Plan/Debug/Ask 所有模式，无一例外
 2. \`check_messages\` 会持续等待直到用户发来新消息；收到后处理并回复，然后再次调用 \`check_messages\`，形成永续循环：回复 → check_messages → 收到消息 → 回复 → check_messages
-3. 严禁在回合开始时或回复未完成时调用 \`check_messages\`；唯一豁免：用户明确要求结束对话
-4. Plan 模式写完方案后、Debug 模式分析完问题后、Ask 模式回答完问题后，均不得直接结束对话，必须调用 \`check_messages\` 等待用户反馈
-5. **Composer 身份标识**：首次调用 \`check_messages\` 时（不传 session_id），**必须**携带 \`composer_token: "${token}"\`。服务端通过此 token 区分不同的 Composer 对话。模式切换/重连时，如果丢失了 session_id，同样携带此 token 调用 \`check_messages\`，服务端会自动恢复对应的会话
-6. 需要用户做选择或确认时（选方案、选框架、确认操作等），必须调用 \`ask_question\`；严禁使用 Cursor 内置的 ask_user_question
-7. \`ask_question\` 参数格式: \`{ "session_id": "xxx", "questions": [{ "question": "问题文本", "options": [{ "id": "a", "label": "选项A" }, { "id": "b", "label": "选项B" }], "allow_multiple": false }] }\`
-8. 单选: \`allow_multiple: false\`；多选: \`allow_multiple: true\`；同一 \`questions\` 数组可混合单选和多选
-9. 用户在每道题中均可额外输入自定义补充文本，无需为此添加额外选项
-10. \`ask_question\` 收到用户回答后，处理完毕仍需调用 \`check_messages\` 继续监听
-11. 禁止在每轮结束时用 \`ask_question\` 问"还有别的需要吗"，回合结束只用 \`check_messages\`
-12. \`check_messages\` 支持可选参数 \`reply\`（string，Markdown 格式）：传入本轮回复的摘要/结论，插件界面会弹窗展示给用户。无需总结时可省略
-13. 首次调用 \`check_messages\` 后会返回一个 \`session_id\`，此后每次调用任何 MCP 工具都必须在 arguments 中带上此 \`session_id\`
-14. 可以使用 subagent 执行搜索、分析等独立任务，但所有 MultiSession MCP 工具（check_messages、ask_question、export_chat）必须由主 Agent 调用，subagent 不得调用
-15. 如果 \`check_messages\` 或 \`ask_question\` 因异常返回/报错，且用户未要求结束对话，严禁输出内部错误给用户，必须立刻再次调用对应工具继续等待
-16. \`export_chat\` 用于导出当前会话的完整对话记录，仅当用户要求"导出对话"时才调用
+3. **still_waiting 处理**：当 \`check_messages\` 返回包含 \`"status":"still_waiting"\` 时，**不要输出任何文字**，直接立刻再次调用 \`check_messages(session_id=上次的id)\` 保持连接
+4. 首次调用 \`check_messages\` 后会返回一个 \`session_id\`，此后每次调用任何 MCP 工具都必须带上此 \`session_id\`
+5. 需要用户做选择或确认时，必须调用 \`ask_question\`；严禁使用 Cursor 内置的 ask_user_question
+6. \`ask_question\` 收到用户回答后，处理完毕仍需调用 \`check_messages\` 继续监听
+7. \`check_messages\` 的 \`reply\` 参数：传入本轮回复的摘要/结论（Markdown），插件界面会展示给用户。无需总结时可省略
+8. 可以使用 subagent 执行搜索、分析等独立任务，但 check_messages、ask_question、export_chat 必须由主 Agent 调用，subagent 不得调用
+9. 如果工具因异常返回/报错，且用户未要求结束对话，必须立刻再次调用对应工具继续等待
 
 ---
 **回合结束（强制）**: 回复完整输出完毕后，最后一步必须调用 MultiSession MCP 的 \`check_messages\` 工具。`;
@@ -59,28 +45,22 @@ function generateResumeRulePrompt(sessionId: string, sessionName: string): strin
 
 # 会话恢复
 
-**请立即调用 \`check_messages\` 并传入 \`session_id: "${sessionId}"\`，恢复名为「${sessionName}」的会话。**
+**请立即调用 \`check_messages(session_id="${sessionId}")\`，恢复名为「${sessionName}」的会话。**
 
 # MCP 工具调用规则
 
 1. 每轮对话回复**完整输出后**，最后一步必须调用 \`check_messages\`，适用于 Agent/Plan/Debug/Ask 所有模式，无一例外
-2. \`check_messages\` 会持续等待直到用户发来新消息；收到后处理并回复，然后再次调用 \`check_messages\`，形成永续循环：回复 → check_messages → 收到消息 → 回复 → check_messages
-3. 严禁在回合开始时或回复未完成时调用 \`check_messages\`；唯一豁免：用户明确要求结束对话
-4. Plan 模式写完方案后、Debug 模式分析完问题后、Ask 模式回答完问题后，均不得直接结束对话，必须调用 \`check_messages\` 等待用户反馈
-5. **本对话已有 session_id: \`${sessionId}\`**，此后每次调用任何 MCP 工具都必须在 arguments 中带上此 \`session_id\`。模式切换/重连时也使用此 session_id
-6. 需要用户做选择或确认时（选方案、选框架、确认操作等），必须调用 \`ask_question\`；严禁使用 Cursor 内置的 ask_user_question
-7. \`ask_question\` 参数格式: \`{ "session_id": "${sessionId}", "questions": [{ "question": "问题文本", "options": [{ "id": "a", "label": "选项A" }, { "id": "b", "label": "选项B" }], "allow_multiple": false }] }\`
-8. 单选: \`allow_multiple: false\`；多选: \`allow_multiple: true\`；同一 \`questions\` 数组可混合单选和多选
-9. 用户在每道题中均可额外输入自定义补充文本，无需为此添加额外选项
-10. \`ask_question\` 收到用户回答后，处理完毕仍需调用 \`check_messages\` 继续监听
-11. 禁止在每轮结束时用 \`ask_question\` 问"还有别的需要吗"，回合结束只用 \`check_messages\`
-12. \`check_messages\` 支持可选参数 \`reply\`（string，Markdown 格式）：传入本轮回复的摘要/结论，插件界面会弹窗展示给用户。无需总结时可省略
-13. 可以使用 subagent 执行搜索、分析等独立任务，但所有 MultiSession MCP 工具（check_messages、ask_question、export_chat）必须由主 Agent 调用，subagent 不得调用
-14. 如果 \`check_messages\` 或 \`ask_question\` 因异常返回/报错，且用户未要求结束对话，严禁输出内部错误给用户，必须立刻再次调用对应工具继续等待
-15. \`export_chat\` 用于导出当前会话的完整对话记录，仅当用户要求"导出对话"时才调用
+2. \`check_messages\` 会持续等待直到用户发来新消息；收到后处理并回复，然后再次调用 \`check_messages\`，形成永续循环
+3. **still_waiting 处理**：当 \`check_messages\` 返回包含 \`"status":"still_waiting"\` 时，**不要输出任何文字**，直接立刻再次调用 \`check_messages(session_id="${sessionId}")\` 保持连接
+4. **本对话的 session_id: \`${sessionId}\`**，此后每次调用任何 MCP 工具都必须带上此 \`session_id\`
+5. 需要用户做选择或确认时，必须调用 \`ask_question\`；严禁使用 Cursor 内置的 ask_user_question
+6. \`ask_question\` 收到用户回答后，处理完毕仍需调用 \`check_messages\` 继续监听
+7. \`check_messages\` 的 \`reply\` 参数：传入本轮回复的摘要/结论（Markdown），插件界面会展示给用户
+8. check_messages、ask_question、export_chat 必须由主 Agent 调用，subagent 不得调用
+9. 如果工具因异常返回/报错，必须立刻再次调用对应工具继续等待
 
 ---
-**回合结束（强制）**: 回复完整输出完毕后，最后一步必须调用 MultiSession MCP 的 \`check_messages\` 工具（session_id="${sessionId}"）。`;
+**回合结束（强制）**: 回复完整输出完毕后，最后一步必须调用 check_messages(session_id="${sessionId}")。`;
 }
 
 // ── Cursor Rule 文件内容（自动注入，含 subagent 限制） ──
@@ -100,18 +80,15 @@ alwaysApply: true
 
 1. 每轮对话回复**完整输出后**，最后一步必须调用 \`check_messages\`，适用于 Agent/Plan/Debug/Ask 所有模式，无一例外
 2. \`check_messages\` 会持续等待直到用户发来新消息；收到后处理并回复，然后再次调用 \`check_messages\`，形成永续循环
-3. **Composer 身份标识**：首次调用 \`check_messages\` 时（不传 session_id），**必须**同时传入 \`composer_token\` 参数。如果用户消息中包含 \`composer_token\` 值则直接使用；否则自行生成一个随机 token（格式 \`c-<随机8位字母数字>\`）。同一 Composer 对话中 composer_token 保持不变。服务端通过此 token 区分不同的 Composer 对话。模式切换/重连时，如果丢失了 session_id，需携带相同的 \`composer_token\` 调用 \`check_messages\`，服务端会自动恢复对应的会话
-4. Plan 模式写完方案后、Debug 模式分析完问题后、Ask 模式回答完问题后，均不得直接结束对话，必须调用 \`check_messages\` 等待用户反馈
+3. **still_waiting 处理**：当 \`check_messages\` 返回包含 \`"status":"still_waiting"\` 时，**不要输出任何文字**，直接立刻再次调用 \`check_messages(session_id=上次的id)\` 保持连接
+4. 首次调用 \`check_messages\` 后会返回 \`session_id\`，此后每次调用任何 MultiSession 工具都必须带上
 5. 需要用户做选择或确认时，必须调用 \`ask_question\`；严禁使用 Cursor 内置的 ask_user_question
 6. \`ask_question\` 参数格式: \`{ "session_id": "xxx", "questions": [{ "question": "问题文本", "options": [{ "id": "a", "label": "选项A" }], "allow_multiple": false }] }\`
-7. 单选: \`allow_multiple: false\`；多选: \`allow_multiple: true\`；可混合
-8. \`ask_question\` 收到回答后，处理完毕仍需调用 \`check_messages\` 继续监听
-9. 禁止在每轮结束时用 \`ask_question\` 问"还有别的需要吗"；\`ask_question\` 仅限任务中确实需要用户决策时使用
-10. \`check_messages\` 的 \`reply\` 参数：传入本轮回复的**摘要/结论**（Markdown），不是完整正文。正常回答应直接写在主回复正文里
-11. 首次调用 \`check_messages\` 后会返回 \`session_id\`，此后每次调用任何 MultiSession 工具都必须带上
-12. **严禁 subagent 调用 MultiSession MCP 工具**。主 Agent 可使用 subagent 执行搜索、分析等独立任务，但 check_messages、ask_question、export_chat 必须且只能由主 Agent 调用
-13. 如果工具因异常返回/报错，且用户未要求结束对话，严禁输出内部错误给用户，必须立刻再次调用对应工具继续等待
-14. \`export_chat\` 仅当用户要求"导出对话"时才调用
+7. \`ask_question\` 收到回答后，处理完毕仍需调用 \`check_messages\` 继续监听
+8. \`check_messages\` 的 \`reply\` 参数：传入本轮回复的**摘要/结论**（Markdown），不是完整正文
+9. **严禁 subagent 调用 MultiSession MCP 工具**。check_messages、ask_question、export_chat 必须且只能由主 Agent 调用
+10. 如果工具因异常返回/报错，且用户未要求结束对话，必须立刻再次调用对应工具继续等待
+11. \`export_chat\` 仅当用户要求"导出对话"时才调用
 
 ---
 **回合结束（强制，仅主 Agent）**: 回复完整输出完毕后，最后一步必须调用 MultiSession MCP 的 \`check_messages\` 工具。subagent 完成任务后直接返回结果，不调用任何 MultiSession MCP 工具。
@@ -517,6 +494,26 @@ function formatDuration(ms: number): string {
 	return `${hr}h${min % 60}m`;
 }
 
+// ── delivery check ──
+
+const DELIVERY_CHECK_DELAY_MS = 8_000;
+
+function scheduleDeliveryCheck(sessionId: string, msgId: string) {
+	setTimeout(() => {
+		const queuePath = path.join(SESSIONS_DIR, sessionId, 'queue.json');
+		const queue = readJson<any[]>(queuePath) || [];
+		const stillPending = queue.some((item: any) => item.id === msgId);
+		if (stillPending && panel) {
+			output.appendLine(`[delivery] message ${msgId} not consumed after ${DELIVERY_CHECK_DELAY_MS}ms in ${sessionId}`);
+			panel.webview.postMessage({
+				type: 'messageNotDelivered',
+				sessionId,
+				msgId,
+			});
+		}
+	}, DELIVERY_CHECK_DELAY_MS);
+}
+
 // ── poll tick ──
 
 function tick() {
@@ -612,7 +609,7 @@ function installMcpConfig(ctx: vscode.ExtensionContext): 'installed' | 'already'
 	const desiredMcpEntry = {
 		command: 'node',
 		args: [mcpServerPath],
-		timeoutMs: 1800000,
+		timeoutMs: 86400000,
 	};
 	const desiredRuleContent = getCursorRuleContent();
 
@@ -759,7 +756,12 @@ function uninstallMcpConfig(): number {
 
 // ── reconnect ──
 
-async function tryReconnectViaCursor() {
+function reconnectPendingFile(workspace: string): string {
+	const hash = Buffer.from(workspace).toString('base64url').slice(0, 16);
+	return path.join(DATA_ROOT, `reconnect-pending-${hash}.json`);
+}
+
+async function tryReconnectViaCursor(sessionId?: string) {
 	const now = Date.now();
 	if (now - lastReconnectAttempt < RECONNECT_COOLDOWN_MS) {
 		output.appendLine('[reconnect] cooldown, skipping');
@@ -767,13 +769,34 @@ async function tryReconnectViaCursor() {
 	}
 	lastReconnectAttempt = now;
 
+	if (sessionId && sessionId !== 'default') {
+		const wsPaths = getWorkspacePaths();
+		const ws = wsPaths[0] || process.cwd();
+		const pendingFile = reconnectPendingFile(ws);
+		writeJson(pendingFile, {
+			targetSessionId: sessionId,
+			ts: Date.now(),
+		});
+		output.appendLine(`[reconnect] wrote reconnect-pending for session ${sessionId} (ws: ${ws})`);
+
+		const sessions = readJson<SessionMeta[]>(SESSIONS_FILE) || [];
+		const target = sessions.find(s => s.id === sessionId);
+		const name = target?.name || sessionId;
+		const ruleText = generateResumeRulePrompt(sessionId, name);
+		await vscode.env.clipboard.writeText(ruleText);
+		output.appendLine(`[reconnect] resume rule for "${name}" copied to clipboard`);
+	}
+
 	try {
-		await vscode.commands.executeCommand('composer.resumeCurrentChat');
-		output.appendLine('[reconnect] composer.resumeCurrentChat succeeded');
+		await vscode.commands.executeCommand('composer.startComposerPrompt');
+		output.appendLine('[reconnect] composer.startComposerPrompt opened');
+		if (sessionId && sessionId !== 'default') {
+			vscode.window.showInformationMessage('正在重连，恢复规则已复制到剪贴板（备用）');
+		}
 	} catch {
 		try {
-			await vscode.commands.executeCommand('composer.startComposerPrompt');
-			output.appendLine('[reconnect] fallback to composer.startComposerPrompt');
+			await vscode.commands.executeCommand('composer.resumeCurrentChat');
+			output.appendLine('[reconnect] fallback to composer.resumeCurrentChat');
 		} catch (e) {
 			output.appendLine(`[reconnect] all attempts failed: ${e}`);
 		}
@@ -857,19 +880,21 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 					content = content ? `${content}\n${imgRefs}` : imgRefs;
 				}
 
-				if (content) {
-					queue.push({
-						id: `${Date.now().toString(16)}-${Math.random().toString(36).slice(2, 8)}`,
-						type: imagePaths.length > 0 ? 'text+image' : 'text',
-						content,
-						images: imagePaths,
-						timestamp: new Date().toISOString(),
-					});
-					ensureDir(path.dirname(queuePath));
-					writeJson(queuePath, queue);
-					output.appendLine(`[msg] queued to ${sid}: ${content.slice(0, 50)}${imagePaths.length > 0 ? ` (+${imagePaths.length} images)` : ''}`);
-				}
-				break;
+			if (content) {
+				const msgId = `${Date.now().toString(16)}-${Math.random().toString(36).slice(2, 8)}`;
+				queue.push({
+					id: msgId,
+					type: imagePaths.length > 0 ? 'text+image' : 'text',
+					content,
+					images: imagePaths,
+					timestamp: new Date().toISOString(),
+				});
+				ensureDir(path.dirname(queuePath));
+				writeJson(queuePath, queue);
+				output.appendLine(`[msg] queued to ${sid}: ${content.slice(0, 50)}${imagePaths.length > 0 ? ` (+${imagePaths.length} images)` : ''}`);
+				scheduleDeliveryCheck(sid, msgId);
+			}
+			break;
 			}
 
 			case 'renameSession': {
@@ -884,14 +909,14 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 				break;
 			}
 
-				case 'reconnect':
-					tryReconnectViaCursor();
-					break;
-
-			case 'copyRule':
-				vscode.env.clipboard.writeText(generateRulePrompt());
-				vscode.window.showInformationMessage('通信规则已复制到剪贴板（含唯一 Composer 标识）');
+			case 'reconnect':
+				tryReconnectViaCursor(msg.sessionId);
 				break;
+
+		case 'copyRule':
+			vscode.env.clipboard.writeText(generateRulePrompt());
+			vscode.window.showInformationMessage('通信规则已复制到剪贴板');
+			break;
 
 			case 'copyResumeRule': {
 				const sessions = readJson<SessionMeta[]>(SESSIONS_FILE) || [];
@@ -1705,7 +1730,7 @@ export function activate(ctx: vscode.ExtensionContext) {
 		}),
 		vscode.commands.registerCommand('multiSession.copyRule', () => {
 			vscode.env.clipboard.writeText(generateRulePrompt());
-			vscode.window.showInformationMessage('通信规则已复制到剪贴板（含唯一 Composer 标识）');
+			vscode.window.showInformationMessage('通信规则已复制到剪贴板');
 		}),
 		vscode.commands.registerCommand('multiSession.wechatLogin', () => {
 			vscode.window.showInformationMessage('请在 WeChat 面板中添加账号并扫码登录');
