@@ -27,7 +27,7 @@ if (fs.existsSync(extDir)) {
 }
 
 // 2. create fresh target dirs
-fs.mkdirSync(path.join(extDir, 'dist'), { recursive: true });
+fs.mkdirSync(path.join(extDir, 'dist', 'hooks'), { recursive: true });
 fs.mkdirSync(path.join(extDir, 'media'), { recursive: true });
 fs.mkdirSync(path.join(extDir, 'scripts'), { recursive: true });
 
@@ -40,6 +40,7 @@ const filesToCopy = [
   'dist/wechat-webview.js',
   'dist/wechat-webview.css',
   'dist/mcp-server.mjs',
+  'dist/hooks/check-queue.sh',
   'package.json',
   'media/icon.svg',
   'scripts/get-cursor-wid',
@@ -52,6 +53,9 @@ for (const rel of filesToCopy) {
   const dstPath = path.join(extDir, rel);
   if (fs.existsSync(srcPath)) {
     fs.copyFileSync(srcPath, dstPath);
+    if (rel.endsWith('.sh')) {
+      fs.chmodSync(dstPath, 0o755);
+    }
     const sz = fs.statSync(dstPath).size;
     console.log(`  [copy] ${rel} (${(sz / 1024).toFixed(1)}kb)`);
   } else {

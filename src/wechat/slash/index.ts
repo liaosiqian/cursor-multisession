@@ -10,6 +10,12 @@ import { logger } from '../util/logger';
 import type { EngineState } from '../engine';
 
 const SESSIONS_FILE = path.join(os.homedir(), ".multisession", "sessions.json");
+const RECENT_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+function recentSessions() {
+  const cutoff = Date.now() - RECENT_THRESHOLD_MS;
+  return listSessions().filter(s => s.lastActiveAt >= cutoff);
+}
 
 export interface SlashContext {
   engineState: EngineState;
@@ -20,6 +26,7 @@ export interface SlashContext {
   router: MessageRouter | null;
   watcherManager: SessionWatcherManager | null;
   onBoundSessionChanged?: (sessionId: string | null) => void;
+  sendScreenshot?: (toUserId: string) => Promise<string>;
 }
 
 type SlashReply = string | { parts: string[] };
@@ -108,7 +115,7 @@ register("use", "切换活跃会话（如 /use viplevel）", async (args, ctx, _
 
   const query = args.trim();
   if (!query) {
-    const sessions = listSessions();
+    const sessions = recentSessions();
     const currentId = ctx.router.getActiveSession(userId);
     const boundId = ctx.watcherManager?.getBoundSessionId();
     const lines = ["用法: 复制发送以下任一指令切换会话:"];
@@ -140,15 +147,15 @@ register("use", "切换活跃会话（如 /use viplevel）", async (args, ctx, _
   return `✓ 已切换到 [${match.name}]\n后续消息和 AI 回复将只通过此会话收发。`;
 });
 
-register("sessions", "列出所有会话及状态", async (_args, ctx, _client, userId) => {
-  const sessions = listSessions();
+register("sessions", "列出最近活跃的会话", async (_args, ctx, _client, userId) => {
+  const sessions = recentSessions();
   if (sessions.length === 0) {
-    return "当前没有活跃会话。请先在 Cursor 中启动一个 Composer 对话。";
+    return "最近 24 小时内没有活跃会话。请先在 Cursor 中启动一个 Composer 对话。";
   }
 
   const boundId = ctx.watcherManager?.getBoundSessionId();
   const hasBound = boundId && sessions.some(s => s.id === boundId);
-  const lines = ["--- 会话列表 ---"];
+  const lines = ["--- 会话列表（最近 24h） ---"];
 
   for (const s of sessions) {
     const isBound = s.id === boundId;
@@ -197,6 +204,18 @@ register("session", "查看当前会话详情", async (_args, ctx, _client, user
     lines.push("/rename <新名称> 重命名当前会话");
   }
   return lines.join("\n");
+});
+
+register("screenshot", "截取 Cursor 窗口并发送", async (_args, ctx, _client, userId) => {
+  if (!ctx.sendScreenshot) {
+    return "截图功能不可用（引擎未连接）";
+  }
+  try {
+    const filePath = await ctx.sendScreenshot(userId);
+    return `截图已发送: ${path.basename(filePath)}`;
+  } catch (err) {
+    return `截图失败: ${err instanceof Error ? err.message : String(err)}`;
+  }
 });
 
 register("rename", "重命名当前会话", async (args, ctx, _client, userId) => {

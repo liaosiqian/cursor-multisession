@@ -97,20 +97,27 @@ function getActiveWindowToken(workspace: string): string | null {
 function tryAdoptOrphan(workspace: string, windowToken: string | null, composerToken: string | null): string | null {
 	const sessions = readSessions();
 	const now = Date.now();
-	const wsSessions = sessions.filter(s => s.alive && s.workspace === workspace);
-	if (wsSessions.length === 0) return null;
 
-	// Phase 0: exact composerToken match — this is the same Composer reconnecting (mode switch / resume)
+	// Phase 0: exact composerToken match — search ALL sessions (alive or dead) in this workspace
 	if (composerToken) {
-		const composerMatch = wsSessions.find(s => s.composerToken === composerToken);
+		const allWsSessions = sessions.filter(s => s.workspace === workspace);
+		const composerMatch = allWsSessions.find(s => s.composerToken === composerToken);
 		if (composerMatch) {
-			log(`[adopt] recovered session ${composerMatch.id} (composerToken match, age=${now - composerMatch.lastActiveAt}ms)`);
+			if (!composerMatch.alive) {
+				composerMatch.alive = true;
+				writeSessions(sessions);
+				log(`[adopt] revived dead session ${composerMatch.id} (composerToken match, age=${now - composerMatch.lastActiveAt}ms)`);
+			} else {
+				log(`[adopt] recovered session ${composerMatch.id} (composerToken match, age=${now - composerMatch.lastActiveAt}ms)`);
+			}
 			return composerMatch.id;
 		}
-		// composerToken provided but no match → this is a NEW Composer, don't adopt anything
 		log(`[adopt] new composerToken ${composerToken}, skipping adoption`);
 		return null;
 	}
+
+	const wsSessions = sessions.filter(s => s.alive && s.workspace === workspace);
+	if (wsSessions.length === 0) return null;
 
 	// Below: legacy path when composerToken is not provided (backward compat)
 
@@ -583,6 +590,85 @@ server.tool(
 	}
 );
 
+// ── take_screenshot tool ──
+
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+const execFileAsync = promisify(execFile);
+
+const SCREENSHOT_DIR = path.join(os.tmpdir(), 'clawbot-screenshots');
+
+server.tool(
+	'take_screenshot',
+	'截取屏幕截图并返回文件路径。支持截取指定应用窗口、Cursor 窗口（默认）、或全屏。返回的图片路径可用 Read 工具查看。也可列出当前可见的应用窗口。',
+	{
+		session_id: z.string().describe('从 check_messages 获取的会话 ID'),
+		target: z.enum(['cursor', 'screen', 'app', 'list']).default('cursor').describe(
+			'截图目标：cursor=Cursor 窗口（默认），screen=全屏，app=指定应用窗口，list=列出可见应用窗口'
+		),
+		app_name: z.string().optional().describe(
+			'当 target=app 时，指定应用名称（如 Safari、Chrome、WeChat）。支持模糊匹配。'
+		),
+	},
+	async (args) => {
+		const sid = args.session_id;
+		if (!sid) {
+			return { content: [{ type: 'text' as const, text: '错误：缺少 session_id' }] };
+		}
+
+		const captureTool = path.resolve(__dirname, '..', 'scripts', 'capture-cursor');
+		if (!fs.existsSync(captureTool)) {
+			return { content: [{ type: 'text' as const, text: `[session_id: ${sid}]\n\n错误：截图工具不存在: ${captureTool}` }] };
+		}
+
+		try {
+			if (args.target === 'list') {
+				const { stdout } = await execFileAsync(captureTool, ['/dev/null', '--list']);
+				return {
+					content: [{
+						type: 'text' as const,
+						text: `[session_id: ${sid}]\n\n当前可见应用窗口：\n${stdout.trim()}`,
+					}],
+				};
+			}
+
+			ensureDir(SCREENSHOT_DIR);
+			const filePath = path.join(SCREENSHOT_DIR, `screenshot_${Date.now()}.png`);
+			const cmdArgs = [filePath];
+
+			if (args.target === 'screen') {
+				cmdArgs.push('--screen');
+			} else if (args.target === 'app') {
+				if (!args.app_name) {
+					return { content: [{ type: 'text' as const, text: `[session_id: ${sid}]\n\n错误：target=app 时需要提供 app_name` }] };
+				}
+				cmdArgs.push('--app', args.app_name);
+			}
+
+			const { stdout } = await execFileAsync(captureTool, cmdArgs);
+			if (!fs.existsSync(filePath) || fs.statSync(filePath).size < 1000) {
+				return { content: [{ type: 'text' as const, text: `[session_id: ${sid}]\n\n截图失败：文件未生成或过小` }] };
+			}
+
+			log(`[take_screenshot] ${sid}: target=${args.target} app=${args.app_name || '-'} output=${stdout.trim()}`);
+
+			return {
+				content: [{
+					type: 'text' as const,
+					text: `[session_id: ${sid}]\n\n截图成功：${filePath}\n分辨率：${stdout.trim()}\n\n可使用 Read 工具查看此图片文件。`,
+				}],
+			};
+		} catch (err: any) {
+			return {
+				content: [{
+					type: 'text' as const,
+					text: `[session_id: ${sid}]\n\n截图失败: ${err.stderr || err.message || String(err)}`,
+				}],
+			};
+		}
+	}
+);
+
 // ── wechat_send tool ──
 
 const WECHAT_ACTION_DIR = path.join(DATA_ROOT, 'wechat-actions');
@@ -592,11 +678,11 @@ server.tool(
 	'通过微信 Bot 向用户发送内容。支持截图、图片、文件、文本消息。截图会自动捕获当前屏幕。仅在微信 Bot 已连接时有效。',
 	{
 		session_id: z.string().describe('从 check_messages 获取的会话 ID'),
-		action: z.enum(['screenshot', 'image', 'file', 'text']).describe(
-			'发送类型：screenshot=截取当前屏幕并发送，image=发送指定图片文件，file=发送指定文件，text=发送文本消息'
+		action: z.enum(['screenshot', 'image', 'file', 'text', 'video']).describe(
+			'发送类型：screenshot=截取当前屏幕并发送，image=发送指定图片文件，file=发送指定文件，text=发送文本消息，video=发送视频文件'
 		),
 		content: z.string().optional().describe(
-			'内容：screenshot 时为可选说明文字，image/file 时为文件绝对路径，text 时为消息文本'
+			'内容：screenshot 时为可选说明文字，image/file/video 时为文件绝对路径，text 时为消息文本'
 		),
 	},
 	async (args) => {

@@ -1,73 +1,49 @@
-import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
-import { listSessions, type SessionEntry } from './multisession';
+import { listSessions } from './multisession';
 import { logger } from '../util/logger';
-
-const MULTISESSION_DIR = path.join(os.homedir(), ".multisession");
-const BINDING_FILE = path.join(MULTISESSION_DIR, "wechat-binding.json");
-
-interface BindingData {
-  boundSessionId: string | null;
-  updatedAt: number;
-}
-
-function loadBinding(): BindingData {
-  try {
-    if (!fs.existsSync(BINDING_FILE)) return { boundSessionId: null, updatedAt: 0 };
-    return JSON.parse(fs.readFileSync(BINDING_FILE, "utf-8")) as BindingData;
-  } catch {
-    return { boundSessionId: null, updatedAt: 0 };
-  }
-}
-
-function saveBinding(data: BindingData): void {
-  fs.mkdirSync(MULTISESSION_DIR, { recursive: true });
-  fs.writeFileSync(BINDING_FILE, JSON.stringify(data, null, 2), "utf-8");
-}
 
 /**
  * Routes WeChat messages to the correct MultiSession session.
  *
- * Binding is persisted to ~/.multisession/wechat-binding.json so all
- * Cursor windows share the same binding state. Only the bound session
- * receives messages; if no session is bound and multiple sessions exist,
- * route() returns null and the caller should prompt the user to /use.
+ * Each WeChatEngine instance has its own MessageRouter, so binding is
+ * per-account (in-memory). This avoids the old bug where multiple accounts
+ * sharing a single wechat-binding.json would overwrite each other's bindings.
  */
 export class MessageRouter {
+
+  private boundSessionId: string | null = null;
 
   constructor() {}
 
   /**
-   * Set the bound session (persisted to shared file).
+   * Set the bound session for this router instance (in-memory).
+   * Each account's engine has its own router, so this is per-account.
    */
   setDefaultSession(sessionId: string): void {
-    saveBinding({ boundSessionId: sessionId, updatedAt: Date.now() });
-    logger.info({ sessionId }, "binding saved to shared file");
+    this.boundSessionId = sessionId;
+    logger.info({ sessionId }, "binding set (in-memory, per-account)");
   }
 
   /**
    * Clear the binding.
    */
   clearBinding(): void {
-    saveBinding({ boundSessionId: null, updatedAt: Date.now() });
-    logger.info("binding cleared");
+    this.boundSessionId = null;
+    logger.info("binding cleared (in-memory)");
   }
 
   /**
-   * Get the currently bound session ID from the shared file.
+   * Get the bound session ID for this router instance.
    * Returns the bound session if alive. If the bound session is dead,
-   * returns null (does NOT fallback) so the user is prompted to rebind.
-   * Only auto-selects when there is NO binding at all and exactly one
+   * returns null so the user is prompted to rebind.
+   * Only auto-selects when there is NO binding and exactly one
    * alive session exists.
    */
   getActiveSession(_userId: string): string | null {
-    const binding = loadBinding();
-
-    if (binding.boundSessionId) {
+    if (this.boundSessionId) {
       const alive = listSessions();
-      return alive.some(s => s.id === binding.boundSessionId)
-        ? binding.boundSessionId
+      return alive.some(s => s.id === this.boundSessionId)
+        ? this.boundSessionId
         : null;
     }
 
@@ -77,18 +53,17 @@ export class MessageRouter {
 
   /**
    * Set the active session for a user (e.g. via /use command).
-   * Under single-binding semantics this is the same as setDefaultSession.
    */
   setActiveSession(_userId: string, sessionId: string): void {
-    saveBinding({ boundSessionId: sessionId, updatedAt: Date.now() });
-    logger.info({ sessionId }, "active session set (binding updated)");
+    this.boundSessionId = sessionId;
+    logger.info({ sessionId }, "active session set (in-memory)");
   }
 
   /**
-   * Read the bound session ID from the shared file (without fallback).
+   * Read the bound session ID.
    */
   getBoundSessionId(): string | null {
-    return loadBinding().boundSessionId;
+    return this.boundSessionId;
   }
 
   /**

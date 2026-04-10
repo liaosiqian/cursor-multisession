@@ -13,7 +13,12 @@ function screenshotDir(): string {
   return dir;
 }
 
-async function captureRaw(): Promise<string> {
+export interface CaptureOptions {
+  app?: string;
+  screen?: boolean;
+}
+
+async function captureRaw(opts: CaptureOptions = {}): Promise<string> {
   const filename = `screenshot_${Date.now()}.png`;
   const filePath = path.join(screenshotDir(), filename);
   const platform = os.platform();
@@ -23,10 +28,16 @@ async function captureRaw(): Promise<string> {
     let captured = false;
     if (fs.existsSync(captureTool)) {
       try {
-        const { stdout } = await execAsync(`"${captureTool}" "${filePath}"`);
+        let cmd = `"${captureTool}" "${filePath}"`;
+        if (opts.screen) {
+          cmd += " --screen";
+        } else if (opts.app) {
+          cmd += ` --app "${opts.app}"`;
+        }
+        const { stdout } = await execAsync(cmd);
         if (fs.existsSync(filePath) && fs.statSync(filePath).size > 1000) {
           captured = true;
-          logger.info({ output: stdout.trim() }, "captured Cursor window via ScreenCaptureKit");
+          logger.info({ output: stdout.trim(), opts }, "captured via ScreenCaptureKit");
         }
       } catch (err) {
         logger.warn({ err: String(err) }, "ScreenCaptureKit capture failed, falling back to screencapture");
@@ -88,8 +99,8 @@ async function compressToJpeg(pngPath: string, quality = 60): Promise<string> {
   return pngPath;
 }
 
-export async function captureScreen(): Promise<string> {
-  const rawPath = await captureRaw();
+export async function captureScreen(opts: CaptureOptions = {}): Promise<string> {
+  const rawPath = await captureRaw(opts);
   const rawSize = fs.statSync(rawPath).size;
   const compressed = await compressToJpeg(rawPath);
   const finalSize = fs.statSync(compressed).size;
@@ -101,7 +112,7 @@ export async function captureScreen(): Promise<string> {
   return compressed;
 }
 
-export async function captureAndCleanup(maxAge = 300_000): Promise<string> {
+export async function captureAndCleanup(maxAge = 300_000, opts: CaptureOptions = {}): Promise<string> {
   const dir = screenshotDir();
   const now = Date.now();
   try {
@@ -114,5 +125,14 @@ export async function captureAndCleanup(maxAge = 300_000): Promise<string> {
     }
   } catch { /* best effort */ }
 
-  return captureScreen();
+  return captureScreen(opts);
+}
+
+export async function listWindows(): Promise<string> {
+  const captureTool = path.join(__dirname, "..", "scripts", "capture-cursor");
+  if (!fs.existsSync(captureTool)) {
+    return "capture tool not found";
+  }
+  const { stdout } = await execAsync(`"${captureTool}" /dev/null --list`);
+  return stdout.trim();
 }

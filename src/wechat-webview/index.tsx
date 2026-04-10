@@ -93,11 +93,13 @@ function AccountCard({ account, sessions, allAccounts }: { account: AccountInfo;
 			{showBindings && (
 				<div className="binding-section">
 					<div className="binding-title">SESSION 绑定</div>
-					{sessions.length === 0 ? (
+					{(() => {
+						const visibleSessions = sessions.filter(s => s.alive || bindingSessions.includes(s.id));
+						return visibleSessions.length === 0 ? (
 						<p className="binding-empty">暂无可用 Session</p>
 					) : (
 						<div className="binding-list">
-							{sessions.map(s => {
+							{visibleSessions.map(s => {
 								const bound = bindingSessions.includes(s.id);
 								const otherAccount = getOtherBoundAccount(s.id);
 								const hasBound = bindingSessions.length > 0;
@@ -142,7 +144,8 @@ function AccountCard({ account, sessions, allAccounts }: { account: AccountInfo;
 								);
 							})}
 						</div>
-					)}
+					);
+					})()}
 					<p className="binding-hint">仅绑定的会话会收发微信消息，可通过微信 /use 命令切换</p>
 				</div>
 			)}

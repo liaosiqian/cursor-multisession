@@ -49,6 +49,7 @@ interface PendingItem {
 	type: string;
 	content: string;
 	timestamp: string;
+	urgent?: boolean;
 }
 
 interface InquiryQuestion {
@@ -81,6 +82,7 @@ function App() {
 	const [mcpConfigured, setMcpConfigured] = useState<boolean>(savedState.mcpConfigured ?? false);
 	const [rulePrompt, setRulePrompt] = useState<string>(savedState.rulePrompt ?? '');
 	const [inputText, setInputText] = useState('');
+	const [draftsMap, setDraftsMap] = useState<Record<string, string>>(savedState.draftsMap ?? {});
 	const [sharedFiles, setSharedFiles] = useState<{ path: string; name: string }[]>([]);
 	const [images, setImages] = useState<{ name: string; dataUrl: string }[]>([]);
 	const [inquiryMap, setInquiryMap] = useState<Record<string, InquiryData>>(savedState.inquiryMap ?? {});
@@ -92,6 +94,9 @@ function App() {
 	const [acMode, setAcMode] = useState<'skill' | 'history' | null>(null);
 	const [acIndex, setAcIndex] = useState(0);
 	const [settingsOpen, setSettingsOpen] = useState(false);
+	const [keepAlive, setKeepAlive] = useState(false);
+	const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
+	const lastUserActivityRef = useRef(Date.now());
 	const settingsRef = useRef<HTMLDivElement>(null);
 
 	const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -102,8 +107,39 @@ function App() {
 
 	// persist state
 	useEffect(() => {
-		vscode.setState({ sessions, activeSessionId, logsMap, pendingMap, mcpConfigured, rulePrompt, inquiryMap, summaryMap });
-	}, [sessions, activeSessionId, logsMap, pendingMap, mcpConfigured, rulePrompt, inquiryMap, summaryMap]);
+		vscode.setState({ sessions, activeSessionId, logsMap, pendingMap, mcpConfigured, rulePrompt, inquiryMap, summaryMap, draftsMap });
+	}, [sessions, activeSessionId, logsMap, pendingMap, mcpConfigured, rulePrompt, inquiryMap, summaryMap, draftsMap]);
+
+	// keep-alive: send a time query every 5 min when user is idle
+	useEffect(() => {
+		if (keepAliveRef.current) {
+			clearInterval(keepAliveRef.current);
+			keepAliveRef.current = null;
+		}
+		if (!keepAlive || !activeSessionId) return;
+
+		const KEEP_ALIVE_INTERVAL = 5 * 60 * 1000;
+		const IDLE_THRESHOLD = 4 * 60 * 1000;
+
+		keepAliveRef.current = setInterval(() => {
+			const idle = Date.now() - lastUserActivityRef.current;
+			if (idle >= IDLE_THRESHOLD) {
+				vscode.postMessage({
+					type: 'text',
+					text: '[keep-alive] 请只回复当前时间，格式：HH:MM:SS',
+					sessionId: activeSessionId,
+					images: [],
+				});
+			}
+		}, KEEP_ALIVE_INTERVAL);
+
+		return () => {
+			if (keepAliveRef.current) {
+				clearInterval(keepAliveRef.current);
+				keepAliveRef.current = null;
+			}
+		};
+	}, [keepAlive, activeSessionId]);
 
 	// close settings dropdown on outside click
 	useEffect(() => {
@@ -141,8 +177,15 @@ function App() {
 		}
 	}, [logsMap, activeSessionId]);
 
-	// reset scroll tracking on session switch
+	const prevSessionRef = useRef(activeSessionId);
 	useEffect(() => {
+		const prev = prevSessionRef.current;
+		if (prev && prev !== activeSessionId) {
+			setDraftsMap(d => ({ ...d, [prev]: inputText }));
+		}
+		setInputText(draftsMap[activeSessionId] ?? '');
+		prevSessionRef.current = activeSessionId;
+
 		userScrolledUp.current = false;
 		prevLogCountRef.current = (logsMap[activeSessionId] || []).length;
 		messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
@@ -245,6 +288,7 @@ function App() {
 		const fileTexts = sharedFiles.map(f => `[file: ${f.path}]`).join('\n');
 		const fullText = [text, fileTexts].filter(Boolean).join('\n');
 		if (!fullText && images.length === 0) return;
+		lastUserActivityRef.current = Date.now();
 
 		vscode.postMessage({
 			type: 'text',
@@ -253,6 +297,7 @@ function App() {
 			images: images.map(img => ({ name: img.name, dataUrl: img.dataUrl })),
 		});
 		setInputText('');
+		setDraftsMap(d => { const n = { ...d }; delete n[activeSessionId || 'default']; return n; });
 		setSharedFiles([]);
 		setImages([]);
 		textareaRef.current?.focus();
@@ -543,6 +588,14 @@ function App() {
 			<button className="btn-small" onClick={handleCopyRule} data-tooltip="复制通信规则到剪贴板（粘贴到新 Composer 启动会话）" data-tooltip-pos="left">
 				规则
 			</button>
+			<button
+				className={`btn-small ${keepAlive ? 'btn-active' : ''}`}
+				onClick={() => { setKeepAlive(prev => !prev); lastUserActivityRef.current = Date.now(); }}
+				data-tooltip={keepAlive ? '保活已开启（每5分钟自动心跳）' : '开启保活（防止会话超时断开）'}
+				data-tooltip-pos="left"
+			>
+				{keepAlive ? '♥' : '♡'}
+			</button>
 			<button className="btn-small btn-accent" onClick={handleReconnect} data-tooltip="重连 Composer（断开时使用）" data-tooltip-pos="left">
 				重连
 			</button>
@@ -744,7 +797,7 @@ function App() {
 					<div className="pending-section">
 						<div className="pending-label">待处理 ({currentPending.length})</div>
 						{currentPending.map(item => (
-							<div key={item.id} className="message message-pending">
+							<div key={item.id} className={`message message-pending${item.urgent ? ' message-urgent' : ''}`}>
 								{editingPendingId === item.id ? (
 									<div className="pending-edit">
 										<textarea
@@ -768,14 +821,17 @@ function App() {
 									</div>
 								) : (
 									<>
-										<div className="message-text">{item.content}</div>
+										<div className="message-text">
+											{item.urgent && <span className="urgent-badge">urgent</span>}
+											{item.content}
+										</div>
 										<div className="pending-actions">
 											<button
-												className="pending-action-btn pending-action-send"
+												className={`pending-action-btn pending-action-send${item.urgent ? ' active' : ''}`}
 												onClick={() => handleResendPending(item.id)}
-												title="立即发送"
+												title={item.urgent ? '已标记为优先' : '立即发送'}
 											>
-												▶
+												{item.urgent ? '⚡' : '▶'}
 											</button>
 											<button
 												className="pending-action-btn"

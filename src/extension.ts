@@ -1271,20 +1271,6 @@ function syncBindingsToRouter(accountId: string): void {
 	if (!entry) return;
 	const bindings = entry.account.bindingSessions;
 
-	if (bindings.length > 0) {
-		writeBindingFile(bindings[0], entry.account.name);
-	} else {
-		// Only clear binding if NO account has a binding
-		const anyBound = [...accounts.values()].some(e =>
-			e.account.id !== accountId && e.account.bindingSessions.length > 0
-		);
-		if (!anyBound) {
-			writeBindingFile(null, `${entry.account.name} (no bindings anywhere)`);
-		} else {
-			output.appendLine(`[wechat:${entry.account.name}] no binding, but another account has one — not clearing`);
-		}
-	}
-
 	// Router/watcher sync requires engine
 	if (!entry.engine) return;
 	const router = entry.engine.getRouter?.();

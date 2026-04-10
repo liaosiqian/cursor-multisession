@@ -11,19 +11,7 @@ import { listSessions, getSessionName } from './multisession';
 import { logger } from '../util/logger';
 
 const MULTISESSION_DIR = path.join(os.homedir(), ".multisession");
-const SESSIONS_FILE = path.join(MULTISESSION_DIR, "sessions.json");
-const BINDING_FILE = path.join(MULTISESSION_DIR, "wechat-binding.json");
 const RESCAN_DEBOUNCE_MS = 500;
-
-function readBoundSessionId(): string | null {
-  try {
-    if (!fs.existsSync(BINDING_FILE)) return null;
-    const data = JSON.parse(fs.readFileSync(BINDING_FILE, "utf-8"));
-    return data?.boundSessionId ?? null;
-  } catch {
-    return null;
-  }
-}
 
 interface SessionWatcher {
   sessionId: string;
@@ -50,6 +38,7 @@ export class SessionWatcherManager {
   private rescanTimer: ReturnType<typeof setTimeout> | null = null;
   private onReplySent: ((ev: ReplySentEvent) => void) | null = null;
   private isUserActive: (() => boolean) | null = null;
+  private boundSessionId: string | null = null;
 
   constructor(
     private client: ClawBotClient,
@@ -65,31 +54,19 @@ export class SessionWatcherManager {
   }
 
   /**
-   * Bind to a specific session. Writes to the shared binding file so all
-   * Cursor windows see the same binding. Only the bound session's
-   * replies/inquiries are forwarded to WeChat.
-   *
-   * Pass null to unbind — when unbound, auto-binds to the sole session if
-   * exactly one exists; otherwise nothing forwards.
+   * Bind to a specific session (in-memory, per-account).
+   * Only the bound session's replies/inquiries are forwarded to WeChat.
    */
   setBoundSession(sessionId: string | null): void {
-    try {
-      fs.mkdirSync(MULTISESSION_DIR, { recursive: true });
-      fs.writeFileSync(BINDING_FILE, JSON.stringify({
-        boundSessionId: sessionId,
-        updatedAt: Date.now(),
-      }, null, 2), "utf-8");
-    } catch (err) {
-      logger.error({ err: String(err) }, "failed to write binding file");
-    }
+    this.boundSessionId = sessionId;
     for (const [id, w] of this.watchers) {
       w.bound = this.isBound(id);
     }
-    logger.info({ boundSessionId: sessionId }, "bound session updated");
+    logger.info({ boundSessionId: sessionId }, "bound session updated (in-memory)");
   }
 
   getBoundSessionId(): string | null {
-    return readBoundSessionId();
+    return this.boundSessionId;
   }
 
   start(): void {
@@ -186,8 +163,7 @@ export class SessionWatcherManager {
   }
 
   private isBound(sessionId: string): boolean {
-    const bound = readBoundSessionId();
-    if (bound) return bound === sessionId;
+    if (this.boundSessionId) return this.boundSessionId === sessionId;
     return this.watchers.size <= 1;
   }
 

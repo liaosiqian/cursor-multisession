@@ -299,6 +299,7 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
             onBoundSessionChanged: (sessionId) => {
               this.emit("boundSessionChanged", sessionId);
             },
+            sendScreenshot: (toUserId: string) => this.sendScreenshot(toUserId),
           };
           const handled = await tryHandleSlashCommand(
             extracted.text,
@@ -547,6 +548,14 @@ export class ClawBotEngine extends EventEmitter<EngineEvents> {
           await this.client.sendText(targetUserId, action.content, ctx);
           this.writeActionResult(filePath, 'done', '文本消息已发送');
           logger.info({ actionId: action.id }, "wechat action: text sent");
+          break;
+        }
+        case 'video': {
+          const upload = await this.media.upload(action.content, targetUserId, UploadMediaType.VIDEO);
+          const videoItem = this.media.buildVideoItem(upload);
+          await this.client.sendMediaItem(targetUserId, videoItem, ctx);
+          this.writeActionResult(filePath, 'done', `视频已发送: ${path.basename(action.content)}`);
+          logger.info({ actionId: action.id, file: action.content }, "wechat action: video sent");
           break;
         }
         default:

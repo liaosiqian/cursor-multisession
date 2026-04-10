@@ -149,6 +149,12 @@ body {
 	color: #fff;
 }
 
+.btn-active {
+	background: var(--accent);
+	color: #fff;
+	border-color: var(--accent);
+}
+
 .badge {
 	background: var(--warning);
 	color: #000;
@@ -553,6 +559,31 @@ body {
 .pending-action-send:hover {
 	color: var(--accent);
 	border-color: var(--accent);
+}
+
+.pending-action-send.active {
+	color: #ff9800;
+	border-color: #ff9800;
+}
+
+.message-urgent {
+	opacity: 1;
+	border-left-color: #ff9800;
+	background: rgba(255, 152, 0, 0.15);
+}
+
+.urgent-badge {
+	display: inline-block;
+	background: #ff9800;
+	color: #fff;
+	font-size: 10px;
+	font-weight: 600;
+	padding: 1px 5px;
+	border-radius: 3px;
+	margin-right: 6px;
+	vertical-align: middle;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
 }
 
 .pending-edit {
