@@ -126,7 +126,9 @@ function App() {
 
 		keepAliveRef.current = setInterval(() => {
 			const idle = Date.now() - lastUserActivityRef.current;
-			if (idle >= IDLE_THRESHOLD) {
+			const hasPending = (pendingMap[activeSessionId] || []).length > 0;
+			const isProcessing = agentStatusMap[activeSessionId]?.status === 'processing';
+			if (idle >= IDLE_THRESHOLD && !hasPending && !isProcessing) {
 				vscode.postMessage({
 					type: 'text',
 					text: '[keep-alive] 请只回复当前时间，格式：HH:MM:SS',
@@ -142,7 +144,7 @@ function App() {
 				keepAliveRef.current = null;
 			}
 		};
-	}, [keepAlive, activeSessionId]);
+	}, [keepAlive, activeSessionId, pendingMap, agentStatusMap]);
 
 	// close settings dropdown on outside click
 	useEffect(() => {
