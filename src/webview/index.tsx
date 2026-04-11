@@ -97,6 +97,10 @@ function App() {
 	const [keepAlive, setKeepAlive] = useState(false);
 	const [undeliveredSessions, setUndeliveredSessions] = useState<Set<string>>(new Set());
 	const [agentStatusMap, setAgentStatusMap] = useState<Record<string, { status: string; since: number; preview?: string }>>({});
+	const [isRecording, setIsRecording] = useState(false);
+	const [isTranscribing, setIsTranscribing] = useState(false);
+	const [recordingDuration, setRecordingDuration] = useState(0);
+	const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 	const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
 	const lastUserActivityRef = useRef(Date.now());
 	const settingsRef = useRef<HTMLDivElement>(null);
@@ -325,6 +329,50 @@ function App() {
 			break;
 		case 'messageNotDelivered':
 			setUndeliveredSessions(prev => new Set(prev).add(msg.sessionId));
+			break;
+		case 'recordingState':
+			setIsRecording(!!msg.recording);
+			setIsTranscribing(!!msg.transcribing);
+			if (msg.recording) {
+				setRecordingDuration(0);
+				if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+				recordingTimerRef.current = setInterval(() => setRecordingDuration(d => d + 1), 1000);
+			} else {
+				if (recordingTimerRef.current) { clearInterval(recordingTimerRef.current); recordingTimerRef.current = null; }
+			}
+			break;
+		case 'transcription':
+			setIsTranscribing(false);
+			setIsRecording(false);
+			if (recordingTimerRef.current) { clearInterval(recordingTimerRef.current); recordingTimerRef.current = null; }
+			if (msg.error) {
+				setLogsMap(prev => {
+					const sid = activeSessionId || 'default';
+					const logs = [...(prev[sid] || [])];
+					logs.push({ role: 'system', text: `🎤 ${msg.error}`, ts: Date.now() });
+					return { ...prev, [sid]: logs };
+				});
+				break;
+			}
+			if (msg.text && editorRef.current) {
+				const editor = editorRef.current;
+				editor.focus();
+				const sel = window.getSelection();
+				if (sel && sel.rangeCount) {
+					const range = sel.getRangeAt(0);
+					range.collapse(false);
+					const textNode = document.createTextNode(msg.text);
+					range.insertNode(textNode);
+					const r = document.createRange();
+					r.setStartAfter(textNode);
+					r.collapse(true);
+					sel.removeAllRanges();
+					sel.addRange(r);
+				} else {
+					editor.appendChild(document.createTextNode(msg.text));
+				}
+				setInputText(editor.textContent || '');
+			}
 			break;
 			}
 		};
@@ -716,6 +764,15 @@ function App() {
 		setEditingPendingText('');
 	}, []);
 
+	const handleMicToggle = useCallback(() => {
+		if (isTranscribing) return;
+		if (isRecording) {
+			vscode.postMessage({ type: 'stopRecording' });
+		} else {
+			vscode.postMessage({ type: 'startRecording' });
+		}
+	}, [isRecording, isTranscribing]);
+
 	const aliveSessions = sessions.filter(s => s.alive);
 	const closedSessions = sessions.filter(s => !s.alive);
 	const [showClosed, setShowClosed] = useState(false);
@@ -1070,7 +1127,18 @@ function App() {
 				</div>
 			)}
 
-			{/* Input Area */}
+			{/* Recording Indicator */}
+			{(isRecording || isTranscribing) && (
+				<div className={`recording-bar${isTranscribing ? ' transcribing' : ''}`}>
+					<span className="recording-bar-dot" />
+					<span>{isTranscribing ? '识别中...' : `录音中 ${Math.floor(recordingDuration / 60).toString().padStart(2, '0')}:${(recordingDuration % 60).toString().padStart(2, '0')}`}</span>
+					{isRecording && (
+						<button className="recording-bar-stop" onClick={handleMicToggle}>停止</button>
+					)}
+				</div>
+			)}
+
+		{/* Input Area */}
 			<div className="input-area">
 				<input
 					ref={fileInputRef}
@@ -1177,6 +1245,14 @@ function App() {
 								title="附加文件夹"
 							>
 								📁
+							</button>
+							<button
+								className={`btn-toolbar btn-mic${isRecording ? ' recording' : ''}${isTranscribing ? ' transcribing' : ''}`}
+								onClick={handleMicToggle}
+								title={isTranscribing ? '识别中...' : isRecording ? '点击停止录音' : '语音输入'}
+								disabled={isTranscribing}
+							>
+								{isTranscribing ? '⏳' : '🎤'}
 							</button>
 						</div>
 						<button

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { ChildProcess, spawn, execSync, execFile } from 'child_process';
 
 const DATA_ROOT = path.join(os.homedir(), '.multisession');
 const SESSIONS_FILE = path.join(DATA_ROOT, 'sessions.json');
@@ -21,6 +22,178 @@ let IS_DEV = false;
 
 const MAX_RECENT_FILES = 30;
 const recentClosedFiles: { path: string; name: string; closedAt: number }[] = [];
+
+// ── Voice recording state ──
+
+let recordingProcess: ChildProcess | null = null;
+let recordingTmpFile: string | null = null;
+let recordBinaryPath: string | null = null;
+let transcribeBinaryPath: string | null = null;
+
+function getScriptsDir(ctx: vscode.ExtensionContext): string {
+	return path.join(ctx.extensionPath, 'scripts');
+}
+
+function ensureVoiceBinaries(ctx: vscode.ExtensionContext): { record: string; transcribe: string } | null {
+	const scriptsDir = getScriptsDir(ctx);
+	const recordSrc = path.join(scriptsDir, 'record.swift');
+	const transcribeSrc = path.join(scriptsDir, 'transcribe.swift');
+	const recordBin = path.join(scriptsDir, 'record');
+	const transcribeBin = path.join(scriptsDir, 'transcribe');
+
+	if (!fs.existsSync(recordSrc) || !fs.existsSync(transcribeSrc)) {
+		output.appendLine('[voice] swift source files not found');
+		return null;
+	}
+
+	try {
+		if (!fs.existsSync(recordBin) || fs.statSync(recordBin).mtimeMs < fs.statSync(recordSrc).mtimeMs) {
+			output.appendLine('[voice] compiling record.swift...');
+			execSync(`swiftc "${recordSrc}" -o "${recordBin}" -framework AVFoundation`, { timeout: 30000 });
+		}
+		if (!fs.existsSync(transcribeBin) || fs.statSync(transcribeBin).mtimeMs < fs.statSync(transcribeSrc).mtimeMs) {
+			output.appendLine('[voice] compiling transcribe.swift...');
+			execSync(`swiftc "${transcribeSrc}" -o "${transcribeBin}" -framework Speech -framework AVFoundation`, { timeout: 30000 });
+		}
+		return { record: recordBin, transcribe: transcribeBin };
+	} catch (err: any) {
+		output.appendLine(`[voice] compile error: ${err.message}`);
+		return null;
+	}
+}
+
+function startRecording(ctx: vscode.ExtensionContext): boolean {
+	if (recordingProcess) {
+		output.appendLine('[voice] already recording');
+		return false;
+	}
+
+	const bins = ensureVoiceBinaries(ctx);
+	if (!bins) {
+		output.appendLine('[voice] binaries not available');
+		return false;
+	}
+	recordBinaryPath = bins.record;
+	transcribeBinaryPath = bins.transcribe;
+
+	const tmpDir = path.join(os.tmpdir(), 'multisession-voice');
+	fs.mkdirSync(tmpDir, { recursive: true });
+	recordingTmpFile = path.join(tmpDir, `rec-${Date.now()}.wav`);
+
+	output.appendLine(`[voice] spawning: ${bins.record} ${recordingTmpFile}`);
+	recordingProcess = spawn(bins.record, [recordingTmpFile!], { stdio: ['pipe', 'pipe', 'pipe'] });
+	output.appendLine(`[voice] record process pid=${recordingProcess.pid}`);
+
+	recordingProcess.stdout?.on('data', (data: Buffer) => {
+		const text = data.toString().trim();
+		output.appendLine(`[voice:stdout] ${text}`);
+	});
+
+	let stderrBuf = '';
+	recordingProcess.stderr?.on('data', (data: Buffer) => {
+		const text = data.toString();
+		stderrBuf += text;
+		output.appendLine(`[voice:stderr] ${text.trim()}`);
+
+		if (text.includes('microphone access denied') || text.includes('not authorized')) {
+			output.appendLine('[voice] microphone permission denied, notifying user');
+			recordingProcess?.kill();
+			recordingProcess = null;
+			recordingTmpFile = null;
+			panel?.webview.postMessage({
+				type: 'recordingState',
+				recording: false,
+				error: '麦克风权限未授权。请打开 系统设置 → 隐私与安全性 → 麦克风，为 Cursor 开启权限后重试。',
+			});
+			panel?.webview.postMessage({
+				type: 'transcription',
+				text: '',
+				error: '麦克风权限未授权。请打开 系统设置 → 隐私与安全性 → 麦克风，为 Cursor 开启权限。',
+			});
+			vscode.window.showErrorMessage(
+				'语音输入需要麦克风权限。请在系统设置中为 Cursor 开启麦克风权限。',
+				'打开系统设置'
+			).then(choice => {
+				if (choice === '打开系统设置') {
+					vscode.env.openExternal(vscode.Uri.parse('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'));
+				}
+			});
+		}
+	});
+
+	recordingProcess.on('error', (err) => {
+		output.appendLine(`[voice] process error: ${err.message}`);
+		recordingProcess = null;
+		recordingTmpFile = null;
+	});
+
+	recordingProcess.on('exit', (code, signal) => {
+		output.appendLine(`[voice] record process exited: code=${code}, signal=${signal}`);
+		if (code !== null && code !== 0 && recordingProcess) {
+			panel?.webview.postMessage({ type: 'recordingState', recording: false, error: stderrBuf.trim() || `Recording failed (exit ${code})` });
+		}
+		recordingProcess = null;
+	});
+
+	output.appendLine(`[voice] recording started → ${recordingTmpFile}`);
+	return true;
+}
+
+function stopRecordingAndTranscribe(locale: string = 'zh-CN'): Promise<string> {
+	return new Promise((resolve, reject) => {
+		if (!recordingProcess || !recordingTmpFile || !transcribeBinaryPath) {
+			reject(new Error('not recording'));
+			return;
+		}
+
+		const wavPath = recordingTmpFile;
+		const transcribeBin = transcribeBinaryPath;
+		const pid = recordingProcess.pid;
+
+		output.appendLine(`[voice] stopping recording: pid=${pid}, file=${wavPath}`);
+		recordingProcess.kill('SIGINT');
+		recordingProcess = null;
+		recordingTmpFile = null;
+
+		setTimeout(() => {
+			if (!fs.existsSync(wavPath)) {
+				output.appendLine(`[voice] ERROR: recording file not found at ${wavPath}`);
+				reject(new Error('recording file not found'));
+				return;
+			}
+			const stat = fs.statSync(wavPath);
+			output.appendLine(`[voice] recording file: ${wavPath} (${(stat.size / 1024).toFixed(1)}KB)`);
+			if (stat.size < 1000) {
+				output.appendLine(`[voice] recording too short (${stat.size} bytes), skipping transcription`);
+				reject(new Error('录音太短，请说话后再停止'));
+				return;
+			}
+
+			output.appendLine(`[voice] starting transcription: ${transcribeBin} ${wavPath} ${locale}`);
+
+			execFile(transcribeBin, [wavPath, locale], { timeout: 60000 }, (err, stdout, stderr) => {
+				const stderrText = (stderr || '').trim();
+				output.appendLine(`[voice] transcribe exit: code=${err?.code ?? 0}, stdout="${stdout.trim()}", stderr="${stderrText}"`);
+
+				if (err) {
+					const userMsg = stderrText.includes('No speech detected') ? '未检测到语音，请对着麦克风说话后再试'
+						: stderrText.includes('not authorized') ? '语音识别权限未授权，请在系统设置中允许'
+						: stderrText || err.message;
+					reject(new Error(userMsg));
+					return;
+				}
+				const text = stdout.trim();
+				if (!text) {
+					output.appendLine(`[voice] transcribe returned empty text`);
+					reject(new Error('未检测到语音，请对着麦克风说话后再试'));
+					return;
+				}
+				output.appendLine(`[voice] transcription result: "${text}"`);
+				resolve(text);
+			});
+		}, 500);
+	});
+}
 
 // ── 通信规则提示词（粘贴到 Composer 用） ──
 
@@ -1131,6 +1304,28 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 						logs.splice(msg.msgIndex, 1);
 						writeJson(logPath, logs);
 						output.appendLine(`[msg] deleted index ${msg.msgIndex} from ${msg.sessionId}`);
+					}
+					break;
+				}
+
+				case 'startRecording': {
+					const ok = startRecording(this.ctx);
+					panel?.webview.postMessage({
+						type: 'recordingState',
+						recording: ok,
+						error: ok ? undefined : 'Failed to start recording. Check microphone permissions.',
+					});
+					break;
+				}
+
+				case 'stopRecording': {
+					const locale = msg.locale || 'zh-CN';
+					panel?.webview.postMessage({ type: 'recordingState', recording: false, transcribing: true });
+					try {
+						const text = await stopRecordingAndTranscribe(locale);
+						panel?.webview.postMessage({ type: 'transcription', text, error: undefined });
+					} catch (err: any) {
+						panel?.webview.postMessage({ type: 'transcription', text: '', error: err.message });
 					}
 					break;
 				}

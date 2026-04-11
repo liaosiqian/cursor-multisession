@@ -1304,3 +1304,86 @@ body {
 	0%, 100% { opacity: 0.3; transform: scale(0.8); }
 	50% { opacity: 1; transform: scale(1.1); }
 }
+
+/* ── Mic Button ── */
+
+.btn-mic.recording {
+	color: #e53e3e !important;
+	animation: mic-pulse 1s infinite ease-in-out;
+	position: relative;
+}
+
+.btn-mic.recording::after {
+	content: '';
+	position: absolute;
+	inset: 2px;
+	border-radius: 50%;
+	border: 1.5px solid #e53e3e;
+	animation: mic-ring 1.2s infinite ease-out;
+	pointer-events: none;
+}
+
+.btn-mic.transcribing {
+	opacity: 0.6;
+	cursor: wait;
+}
+
+@keyframes mic-pulse {
+	0%, 100% { transform: scale(1); }
+	50% { transform: scale(1.15); }
+}
+
+@keyframes mic-ring {
+	0% { opacity: 0.8; transform: scale(0.8); }
+	100% { opacity: 0; transform: scale(1.5); }
+}
+
+/* ── Recording Bar ── */
+
+.recording-bar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 12px;
+	margin: 0 8px;
+	background: rgba(229, 62, 62, 0.1);
+	border: 1px solid rgba(229, 62, 62, 0.3);
+	border-radius: 4px;
+	font-size: 12px;
+	color: #e53e3e;
+	font-variant-numeric: tabular-nums;
+}
+
+.recording-bar.transcribing {
+	background: rgba(49, 130, 206, 0.1);
+	border-color: rgba(49, 130, 206, 0.3);
+	color: var(--accent);
+}
+
+.recording-bar-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: currentColor;
+	animation: mic-pulse 1s infinite ease-in-out;
+	flex-shrink: 0;
+}
+
+.recording-bar.transcribing .recording-bar-dot {
+	animation: agent-pulse 1.2s infinite ease-in-out;
+}
+
+.recording-bar-stop {
+	margin-left: auto;
+	padding: 2px 10px;
+	border: 1px solid rgba(229, 62, 62, 0.4);
+	border-radius: 3px;
+	background: transparent;
+	color: #e53e3e;
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.recording-bar-stop:hover {
+	background: rgba(229, 62, 62, 0.15);
+}

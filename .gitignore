@@ -2,3 +2,7 @@ node_modules/
 dist/
 *.vsix
 .DS_Store
+scripts/record
+scripts/transcribe
+scripts/capture-cursor
+scripts/get-cursor-wid

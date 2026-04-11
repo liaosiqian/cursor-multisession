@@ -45,6 +45,10 @@ const filesToCopy = [
   'media/icon.svg',
   'scripts/get-cursor-wid',
   'scripts/capture-cursor',
+  'scripts/record',
+  'scripts/record.swift',
+  'scripts/transcribe',
+  'scripts/transcribe.swift',
 ];
 
 let allOk = true;
