@@ -19,6 +19,9 @@ let output: vscode.OutputChannel;
 let EXT_VERSION = '?';
 let IS_DEV = false;
 
+const MAX_RECENT_FILES = 30;
+const recentClosedFiles: { path: string; name: string; closedAt: number }[] = [];
+
 // ── 通信规则提示词（粘贴到 Composer 用） ──
 
 function generateRulePrompt(): string {
@@ -167,19 +170,12 @@ interface SlashResult {
 }
 
 function expandReferences(text: string): string {
-	const skillBlocks: string[] = [];
-	const historyBlocks: string[] = [];
-
-	const cleaned = text
+	return text
 		.replace(/\[file: @skill:([^\]]+)\]/g, (_match, skillName: string) => {
 			const skills = scanSkillDirs();
 			const target = skills.find(s => s.name === skillName);
 			if (!target) return `[skill: ${skillName} — not found]`;
-			skillBlocks.push(
-				`Skill: ${skillName}\n` +
-				`Path: ${target.skillPath}`
-			);
-			return '';
+			return `[Skill: ${skillName} — 请用 Read 工具读取 ${target.skillPath} 并按其中指引执行]`;
 		})
 		.replace(/\[file: @history:([^\]]+)\]/g, (_match, composerId: string) => {
 			const headers = loadComposerHeaders();
@@ -190,38 +186,10 @@ function expandReferences(text: string): string {
 			const sub = h.subtitle || '';
 			const age = h.lastUpdatedAt ? formatDuration(Date.now() - h.lastUpdatedAt) : '';
 			const transcriptPath = findTranscriptPath(composerId);
-			historyBlocks.push(
-				`Chat: ${name}\n` +
-				`Mode: ${mode}, Last active: ${age || 'unknown'}\n` +
-				`Summary: ${sub}\n` +
-				(transcriptPath ? `Transcript: ${transcriptPath}` : `ID: ${composerId}`)
-			);
-			return '';
+			const ref = transcriptPath ? `Transcript: ${transcriptPath}` : `ID: ${composerId}`;
+			return `[Chat: ${name} | Mode: ${mode}, Last active: ${age || 'unknown'}, Summary: ${sub}, ${ref}]`;
 		})
 		.trim();
-
-	const parts: string[] = [];
-
-	if (skillBlocks.length > 0) {
-		parts.push(
-			'[附加 Skill] 请用 Read 工具读取以下 SKILL.md 文件，然后按其中的指引执行：\n\n' +
-			skillBlocks.join('\n\n---\n\n')
-		);
-	}
-
-	if (historyBlocks.length > 0) {
-		parts.push(
-			'[引用历史对话] 以下是用户引用的历史对话上下文：\n\n' +
-			historyBlocks.join('\n\n---\n\n')
-		);
-	}
-
-	if (cleaned) {
-		parts.push(cleaned);
-	} else if (parts.length > 0) {
-		parts.push('请参考以上引用内容，告诉我你的理解或继续相关工作。');
-	}
-	return parts.join('\n\n');
 }
 
 function findTranscriptPath(composerId: string): string | null {
@@ -1140,7 +1108,14 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 							files.push({ path: uri.fsPath, name: path.basename(uri.fsPath) });
 						}
 					}
-					panel?.webview.postMessage({ type: 'openFilesList', files });
+					const recent: { path: string; name: string }[] = [];
+					for (const rf of recentClosedFiles) {
+						if (!seen.has(rf.path)) {
+							seen.add(rf.path);
+							recent.push({ path: rf.path, name: rf.name });
+						}
+					}
+					panel?.webview.postMessage({ type: 'openFilesList', files, recentFiles: recent });
 					break;
 				}
 
@@ -1698,6 +1673,18 @@ export function activate(ctx: vscode.ExtensionContext) {
 	wechatStatusBar.show();
 	ctx.subscriptions.push(wechatStatusBar);
 	updateWechatStatusBar();
+
+	// ── track recently closed files ──
+	ctx.subscriptions.push(
+		vscode.workspace.onDidCloseTextDocument(doc => {
+			if (doc.uri.scheme !== 'file') return;
+			const p = doc.uri.fsPath;
+			const idx = recentClosedFiles.findIndex(f => f.path === p);
+			if (idx >= 0) recentClosedFiles.splice(idx, 1);
+			recentClosedFiles.unshift({ path: p, name: path.basename(p), closedAt: Date.now() });
+			if (recentClosedFiles.length > MAX_RECENT_FILES) recentClosedFiles.length = MAX_RECENT_FILES;
+		})
+	);
 
 	// ── commands ──
 	ctx.subscriptions.push(

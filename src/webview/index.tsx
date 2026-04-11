@@ -103,6 +103,7 @@ function App() {
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const messageLogRef = useRef<HTMLDivElement>(null);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const editorRef = useRef<HTMLDivElement>(null);
 	const userScrolledUp = useRef(false);
 	const prevLogCountRef = useRef(0);
 
@@ -273,9 +274,10 @@ function App() {
 				break;
 			case 'openFilesList':
 				setAcItems(prev => {
-					const nonFiles = prev.filter(i => !i.id.startsWith('file:'));
-					const fileItems = (msg.files || []).map((f: any) => ({ id: `file:${f.path}`, label: f.name, desc: f.path, group: 'file' }));
-					return [...fileItems, ...nonFiles];
+					const nonFiles = prev.filter(i => !i.id.startsWith('file:') && !i.id.startsWith('recent:'));
+					const fileItems = (msg.files || []).map((f: any) => ({ id: `file:${f.path}`, label: f.name, desc: f.path }));
+					const recentItems = (msg.recentFiles || []).map((f: any) => ({ id: `recent:${f.path}`, label: f.name, desc: f.path }));
+					return [...fileItems, ...recentItems, ...nonFiles];
 				});
 				if (acMode !== 'history') {
 					setAcMode('history');
@@ -295,25 +297,53 @@ function App() {
 		return () => window.removeEventListener('message', handler);
 	}, []);
 
+	const extractEditorContent = useCallback(() => {
+		const editor = editorRef.current;
+		if (!editor) return { text: '', files: [] as { path: string; name: string }[] };
+		const parts: string[] = [];
+		const files: { path: string; name: string }[] = [];
+		const walk = (node: Node) => {
+			if (node.nodeType === Node.TEXT_NODE) {
+				parts.push(node.textContent || '');
+			} else if (node.nodeType === Node.ELEMENT_NODE) {
+				const el = node as HTMLElement;
+				if (el.dataset.chipPath) {
+					files.push({ path: el.dataset.chipPath, name: el.dataset.chipName || el.textContent || '' });
+					parts.push(`[file: ${el.dataset.chipPath}]`);
+				} else if (el.tagName === 'BR') {
+					parts.push('\n');
+				} else if (el.tagName === 'DIV' || el.tagName === 'P') {
+					if (parts.length > 0 && parts[parts.length - 1] !== '\n') parts.push('\n');
+					el.childNodes.forEach(walk);
+					if (parts.length > 0 && parts[parts.length - 1] !== '\n') parts.push('\n');
+				} else {
+					el.childNodes.forEach(walk);
+				}
+			}
+		};
+		editor.childNodes.forEach(walk);
+		return { text: parts.join('').trim(), files };
+	}, []);
+
 	const handleSend = useCallback(() => {
-		const text = inputText.trim();
-		const fileTexts = sharedFiles.map(f => `[file: ${f.path}]`).join('\n');
-		const fullText = [text, fileTexts].filter(Boolean).join('\n');
-		if (!fullText && images.length === 0) return;
+		const { text, files } = extractEditorContent();
+		const imgList = images;
+		if (!text && files.length === 0 && imgList.length === 0) return;
 		lastUserActivityRef.current = Date.now();
 
 		vscode.postMessage({
 			type: 'text',
-			text: fullText,
+			text,
 			sessionId: activeSessionId || 'default',
-			images: images.map(img => ({ name: img.name, dataUrl: img.dataUrl })),
+			images: imgList.map(img => ({ name: img.name, dataUrl: img.dataUrl })),
 		});
+		if (editorRef.current) editorRef.current.innerHTML = '';
 		setInputText('');
 		setDraftsMap(d => { const n = { ...d }; delete n[activeSessionId || 'default']; return n; });
 		setSharedFiles([]);
 		setImages([]);
-		textareaRef.current?.focus();
-	}, [inputText, sharedFiles, activeSessionId, images]);
+		editorRef.current?.focus();
+	}, [extractEditorContent, activeSessionId, images]);
 
 	const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -359,12 +389,26 @@ function App() {
 		});
 	}, [activeSessionId]);
 
-	const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-		const val = e.target.value;
-		setInputText(val);
+	const getTextBeforeCursor = useCallback((): string => {
+		const sel = window.getSelection();
+		if (!sel || !sel.rangeCount || !editorRef.current) return '';
+		const range = sel.getRangeAt(0);
+		const preRange = document.createRange();
+		preRange.setStart(editorRef.current, 0);
+		preRange.setEnd(range.startContainer, range.startOffset);
+		const frag = preRange.cloneContents();
+		const div = document.createElement('div');
+		div.appendChild(frag);
+		return div.textContent || '';
+	}, []);
 
-		const cursor = e.target.selectionStart ?? val.length;
-		const beforeCursor = val.slice(0, cursor);
+	const handleEditorInput = useCallback(() => {
+		const editor = editorRef.current;
+		if (!editor) return;
+		const plainText = editor.textContent || '';
+		setInputText(plainText);
+
+		const beforeCursor = getTextBeforeCursor();
 		const lastSlash = beforeCursor.lastIndexOf('/');
 		const lastAt = beforeCursor.lastIndexOf('@');
 
@@ -385,16 +429,17 @@ function App() {
 			setAcItems([]);
 		}
 		setAcIndex(0);
-	}, []);
+	}, [getTextBeforeCursor]);
 
 	const acQuery = useMemo(() => {
 		const trigger = acMode === 'skill' ? '/' : acMode === 'history' ? '@' : null;
 		if (!trigger) return '';
-		const lastIdx = inputText.lastIndexOf(trigger);
+		const beforeCursor = getTextBeforeCursor();
+		const lastIdx = beforeCursor.lastIndexOf(trigger);
 		if (lastIdx < 0) return '';
-		const after = inputText.slice(lastIdx + 1);
+		const after = beforeCursor.slice(lastIdx + 1);
 		return after.includes(' ') ? '' : after.toLowerCase();
-	}, [acMode, inputText]);
+	}, [acMode, inputText, getTextBeforeCursor]);
 
 	const filteredAcItems = useMemo(() => {
 		if (!acMode || acItems.length === 0) return [];
@@ -409,24 +454,78 @@ function App() {
 		return acItems;
 	}, [acMode, acItems, acQuery]);
 
-	const selectAcItem = useCallback((item: { id: string; label: string }) => {
-		if (acMode === 'skill') {
-			setSharedFiles(prev => [...prev, { path: `@skill:${item.label}`, name: `skill: ${item.label}` }]);
-		} else if (item.id.startsWith('file:')) {
-			const filePath = item.id.slice(5);
-			setSharedFiles(prev => [...prev, { path: filePath, name: item.label }]);
-		} else if (acMode === 'history') {
-			setSharedFiles(prev => [...prev, { path: `@history:${item.id}`, name: `chat: ${item.label}` }]);
+	const insertChipAtCursor = useCallback((chipPath: string, chipName: string, chipType: 'skill' | 'file' | 'chat') => {
+		const editor = editorRef.current;
+		if (!editor) return;
+		const sel = window.getSelection();
+		if (!sel || !sel.rangeCount) return;
+
+		const range = sel.getRangeAt(0);
+		const trigger = chipType === 'skill' ? '/' : '@';
+		const beforeText = getTextBeforeCursor();
+		const triggerIdx = beforeText.lastIndexOf(trigger);
+		if (triggerIdx < 0) return;
+
+		const charsToDelete = beforeText.length - triggerIdx;
+		for (let i = 0; i < charsToDelete; i++) {
+			const r = sel.getRangeAt(0);
+			r.setStart(r.startContainer, Math.max(0, r.startOffset - 1));
+			r.deleteContents();
 		}
-		const trigger = acMode === 'skill' ? '/' : '@';
-		const lastIdx = inputText.lastIndexOf(trigger);
-		setInputText(lastIdx > 0 ? inputText.slice(0, lastIdx).trimEnd() : '');
+
+		const chip = document.createElement('span');
+		chip.contentEditable = 'false';
+		chip.dataset.chipPath = chipPath;
+		chip.dataset.chipName = chipName;
+		const colorClass = chipType === 'skill' ? 'chip-skill' : chipType === 'chat' ? 'chip-chat' : 'chip-file';
+		chip.className = `inline-chip ${colorClass}`;
+		const icon = chipType === 'skill' ? '⚡' : chipType === 'chat' ? '💬' : '📄';
+		chip.textContent = `${icon} ${chipName}`;
+
+		const newRange = sel.getRangeAt(0);
+		newRange.insertNode(chip);
+
+		const space = document.createTextNode('\u00A0');
+		chip.after(space);
+		const afterRange = document.createRange();
+		afterRange.setStartAfter(space);
+		afterRange.collapse(true);
+		sel.removeAllRanges();
+		sel.addRange(afterRange);
+
+		setInputText(editor.textContent || '');
+	}, [getTextBeforeCursor]);
+
+	const selectAcItem = useCallback((item: { id: string; label: string }) => {
+		let chipPath = '';
+		let chipName = '';
+		let chipType: 'skill' | 'file' | 'chat' = 'file';
+
+		if (acMode === 'skill') {
+			chipPath = `@skill:${item.label}`;
+			chipName = item.label;
+			chipType = 'skill';
+		} else if (item.id.startsWith('file:')) {
+			chipPath = item.id.slice(5);
+			chipName = item.label;
+			chipType = 'file';
+		} else if (item.id.startsWith('recent:')) {
+			chipPath = item.id.slice(7);
+			chipName = item.label;
+			chipType = 'file';
+		} else if (acMode === 'history') {
+			chipPath = `@history:${item.id}`;
+			chipName = item.label;
+			chipType = 'chat';
+		}
+
+		insertChipAtCursor(chipPath, chipName, chipType);
 		setAcMode(null);
 		setAcItems([]);
-		setTimeout(() => textareaRef.current?.focus(), 50);
-	}, [acMode]);
+		setTimeout(() => editorRef.current?.focus(), 50);
+	}, [acMode, insertChipAtCursor]);
 
-	const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+	const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
 		if (acMode && filteredAcItems.length > 0) {
 			if (e.key === 'ArrowDown') {
 				e.preventDefault();
@@ -917,28 +1016,13 @@ function App() {
 				</div>
 			)}
 
-			{/* Shared Files */}
-			{sharedFiles.length > 0 && (
-				<div className="shared-files">
-					{sharedFiles.map((f, i) => (
-						<span key={i} className="file-tag">
-							{f.name}
-							<button onClick={() => setSharedFiles(prev => prev.filter((_, j) => j !== i))}>×</button>
-						</span>
-					))}
-				</div>
-			)}
-
 			{/* Image Preview */}
 			{images.length > 0 && (
 				<div className="image-preview-bar">
 					{images.map((img, i) => (
 						<div key={i} className="image-preview-item">
 							<img src={img.dataUrl} alt={img.name} className="image-preview-thumb" />
-							<button
-								className="image-preview-remove"
-								onClick={() => setImages(prev => prev.filter((_, j) => j !== i))}
-							>×</button>
+							<button className="image-preview-remove" onClick={() => setImages(prev => prev.filter((_, j) => j !== i))}>×</button>
 						</div>
 					))}
 				</div>
@@ -954,36 +1038,14 @@ function App() {
 					style={{ display: 'none' }}
 					onChange={handleImagePick}
 				/>
-				<div className="input-toolbar">
-					<button
-						className="btn-toolbar"
-						onClick={() => fileInputRef.current?.click()}
-						title="添加图片"
-					>
-						🖼
-					</button>
-					<button
-						className="btn-toolbar"
-						onClick={() => vscode.postMessage({ type: 'pickFile' })}
-						title="附加文件 (@file)"
-					>
-						📎
-					</button>
-					<button
-						className="btn-toolbar"
-						onClick={() => vscode.postMessage({ type: 'pickFolder' })}
-						title="附加文件夹"
-					>
-						📁
-					</button>
-				</div>
 				<div className="input-wrapper">
 				{acMode && filteredAcItems.length > 0 && (
 					<div className="ac-popup">
 						{acMode === 'skill' && <div className="ac-title">Skills</div>}
 						{acMode === 'history' && (() => {
 							const files = filteredAcItems.filter((i: any) => i.id.startsWith('file:'));
-							const chats = filteredAcItems.filter((i: any) => !i.id.startsWith('file:'));
+							const recent = filteredAcItems.filter((i: any) => i.id.startsWith('recent:'));
+							const chats = filteredAcItems.filter((i: any) => !i.id.startsWith('file:') && !i.id.startsWith('recent:'));
 							let globalIdx = -1;
 							return <>
 								{files.length > 0 && <>
@@ -995,6 +1057,20 @@ function App() {
 											onMouseDown={e => { e.preventDefault(); selectAcItem(item); }}
 											onMouseEnter={() => setAcIndex(idx)}>
 											<span className="ac-icon">📄</span>
+											<span className="ac-label">{item.label}</span>
+											{item.desc && <span className="ac-desc">{item.desc}</span>}
+										</div>;
+									})}
+								</>}
+								{recent.length > 0 && <>
+									<div className="ac-title">Recent Files</div>
+									{recent.map(item => {
+										globalIdx++;
+										const idx = globalIdx;
+										return <div key={item.id} className={`ac-item${idx === acIndex ? ' active' : ''}`}
+											onMouseDown={e => { e.preventDefault(); selectAcItem(item); }}
+											onMouseEnter={() => setAcIndex(idx)}>
+											<span className="ac-icon">🕐</span>
 											<span className="ac-label">{item.label}</span>
 											{item.desc && <span className="ac-desc">{item.desc}</span>}
 										</div>;
@@ -1026,24 +1102,51 @@ function App() {
 						))}
 					</div>
 				)}
-					<textarea
-						ref={textareaRef}
-						className="input-textarea"
-						value={inputText}
-						onChange={handleInputChange}
+					<div
+						ref={editorRef}
+						className="input-editor"
+						contentEditable
+						onInput={handleEditorInput}
 						onKeyDown={handleKeyDown}
 						onPaste={handlePaste}
-						placeholder="输入消息... (Enter 发送, / Skills, @ History)"
-						rows={4}
+						data-placeholder="输入消息... (Enter 发送, / Skills, @ History)"
+						role="textbox"
+						aria-multiline="true"
 					/>
+					<div className="input-bottom-bar">
+						<div className="input-toolbar">
+							<button
+								className="btn-toolbar"
+								onClick={() => fileInputRef.current?.click()}
+								title="添加图片"
+							>
+								🖼
+							</button>
+							<button
+								className="btn-toolbar"
+								onClick={() => vscode.postMessage({ type: 'pickFile' })}
+								title="附加文件"
+							>
+								📎
+							</button>
+							<button
+								className="btn-toolbar"
+								onClick={() => vscode.postMessage({ type: 'pickFolder' })}
+								title="附加文件夹"
+							>
+								📁
+							</button>
+						</div>
+						<button
+							className="btn-send"
+							onClick={handleSend}
+							disabled={!inputText.trim() && images.length === 0}
+							title="发送 (Enter)"
+						>
+							↑
+						</button>
+					</div>
 				</div>
-				<button
-					className="btn-send"
-					onClick={handleSend}
-					disabled={!inputText.trim() && sharedFiles.length === 0 && images.length === 0}
-				>
-					发送
-				</button>
 			</div>
 			<div className="version-footer">v{extVersion}</div>
 		</div>
