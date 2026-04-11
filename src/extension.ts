@@ -29,6 +29,7 @@ let recordingProcess: ChildProcess | null = null;
 let recordingTmpFile: string | null = null;
 let recordBinaryPath: string | null = null;
 let transcribeBinaryPath: string | null = null;
+let ttsProcess: ChildProcess | null = null;
 
 function getScriptsDir(ctx: vscode.ExtensionContext): string {
 	return path.join(ctx.extensionPath, 'scripts');
@@ -193,6 +194,52 @@ function stopRecordingAndTranscribe(locale: string = 'zh-CN'): Promise<string> {
 			});
 		}, 500);
 	});
+}
+
+function stripMarkdown(text: string): string {
+	return text
+		.replace(/```[\s\S]*?```/g, '')
+		.replace(/`[^`]+`/g, (m) => m.slice(1, -1))
+		.replace(/\*\*(.+?)\*\*/g, '$1')
+		.replace(/\*(.+?)\*/g, '$1')
+		.replace(/^#+\s*/gm, '')
+		.replace(/^[-*]\s+/gm, '')
+		.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+		.replace(/\n{3,}/g, '\n\n')
+		.trim();
+}
+
+function speakText(text: string): void {
+	stopSpeaking();
+	const clean = stripMarkdown(text);
+	if (!clean) return;
+
+	const truncated = clean.length > 500 ? clean.slice(0, 500) + '...' : clean;
+	output.appendLine(`[tts] speaking: "${truncated.slice(0, 80)}..."`);
+
+	ttsProcess = spawn('say', ['-v', 'Tingting', truncated], { stdio: 'ignore' });
+	panel?.webview.postMessage({ type: 'ttsState', speaking: true });
+
+	ttsProcess.on('exit', () => {
+		ttsProcess = null;
+		panel?.webview.postMessage({ type: 'ttsState', speaking: false });
+		output.appendLine('[tts] finished');
+	});
+
+	ttsProcess.on('error', (err) => {
+		output.appendLine(`[tts] error: ${err.message}`);
+		ttsProcess = null;
+		panel?.webview.postMessage({ type: 'ttsState', speaking: false });
+	});
+}
+
+function stopSpeaking(): void {
+	if (ttsProcess) {
+		ttsProcess.kill();
+		ttsProcess = null;
+		panel?.webview.postMessage({ type: 'ttsState', speaking: false });
+		output.appendLine('[tts] stopped');
+	}
 }
 
 // ── 通信规则提示词（粘贴到 Composer 用） ──
@@ -1327,6 +1374,16 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 					} catch (err: any) {
 						panel?.webview.postMessage({ type: 'transcription', text: '', error: err.message });
 					}
+					break;
+				}
+
+				case 'speakText': {
+					if (msg.text) speakText(msg.text);
+					break;
+				}
+
+				case 'stopSpeaking': {
+					stopSpeaking();
 					break;
 				}
 			}

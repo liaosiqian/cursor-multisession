@@ -1387,3 +1387,26 @@ body {
 .recording-bar-stop:hover {
 	background: rgba(229, 62, 62, 0.15);
 }
+
+.recording-bar.speaking {
+	background: rgba(72, 187, 120, 0.1);
+	border-color: rgba(72, 187, 120, 0.3);
+	color: #48bb78;
+}
+
+.recording-bar.speaking .recording-bar-stop {
+	border-color: rgba(72, 187, 120, 0.4);
+	color: #48bb78;
+}
+
+.recording-bar.speaking .recording-bar-stop:hover {
+	background: rgba(72, 187, 120, 0.15);
+}
+
+/* ── Voice Mode Toggle ── */
+
+.btn-voice-mode.active {
+	color: #48bb78 !important;
+	background: rgba(72, 187, 120, 0.12);
+	border-radius: 3px;
+}

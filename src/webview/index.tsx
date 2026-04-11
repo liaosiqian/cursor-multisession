@@ -100,7 +100,10 @@ function App() {
 	const [isRecording, setIsRecording] = useState(false);
 	const [isTranscribing, setIsTranscribing] = useState(false);
 	const [recordingDuration, setRecordingDuration] = useState(0);
+	const [voiceMode, setVoiceMode] = useState(false);
+	const [isSpeaking, setIsSpeaking] = useState(false);
 	const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+	const voiceModeRef = useRef(false);
 	const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
 	const lastUserActivityRef = useRef(Date.now());
 	const settingsRef = useRef<HTMLDivElement>(null);
@@ -111,6 +114,8 @@ function App() {
 	const editorRef = useRef<HTMLDivElement>(null);
 	const userScrolledUp = useRef(false);
 	const prevLogCountRef = useRef(0);
+
+	useEffect(() => { voiceModeRef.current = voiceMode; }, [voiceMode]);
 
 	// persist state
 	useEffect(() => {
@@ -215,9 +220,18 @@ function App() {
 				case 'sessions':
 					setSessions(msg.data || []);
 					break;
-				case 'syncLogs':
-					setLogsMap(prev => ({ ...prev, [msg.sessionId]: msg.data }));
-					break;
+				case 'syncLogs': {
+				const prevLogs = logsMap[msg.sessionId] || [];
+				const newLogs: ChatMessage[] = msg.data || [];
+				setLogsMap(prev => ({ ...prev, [msg.sessionId]: newLogs }));
+				if (voiceModeRef.current && msg.sessionId === activeSessionId && newLogs.length > prevLogs.length) {
+					const latest = newLogs[newLogs.length - 1];
+					if (latest && latest.role === 'assistant' && latest.text) {
+						vscode.postMessage({ type: 'speakText', text: latest.text });
+					}
+				}
+				break;
+			}
 			case 'pendingCount':
 				setPendingMap(prev => ({ ...prev, [msg.sessionId]: msg.items || [] }));
 				if (!msg.items || msg.items.length === 0) {
@@ -354,25 +368,37 @@ function App() {
 				});
 				break;
 			}
-			if (msg.text && editorRef.current) {
-				const editor = editorRef.current;
-				editor.focus();
-				const sel = window.getSelection();
-				if (sel && sel.rangeCount) {
-					const range = sel.getRangeAt(0);
-					range.collapse(false);
-					const textNode = document.createTextNode(msg.text);
-					range.insertNode(textNode);
-					const r = document.createRange();
-					r.setStartAfter(textNode);
-					r.collapse(true);
-					sel.removeAllRanges();
-					sel.addRange(r);
-				} else {
-					editor.appendChild(document.createTextNode(msg.text));
+			if (msg.text) {
+				if (voiceModeRef.current) {
+					vscode.postMessage({
+						type: 'text',
+						text: msg.text,
+						sessionId: activeSessionId || 'default',
+						images: [],
+					});
+				} else if (editorRef.current) {
+					const editor = editorRef.current;
+					editor.focus();
+					const sel = window.getSelection();
+					if (sel && sel.rangeCount) {
+						const range = sel.getRangeAt(0);
+						range.collapse(false);
+						const textNode = document.createTextNode(msg.text);
+						range.insertNode(textNode);
+						const r = document.createRange();
+						r.setStartAfter(textNode);
+						r.collapse(true);
+						sel.removeAllRanges();
+						sel.addRange(r);
+					} else {
+						editor.appendChild(document.createTextNode(msg.text));
+					}
+					setInputText(editor.textContent || '');
 				}
-				setInputText(editor.textContent || '');
 			}
+			break;
+		case 'ttsState':
+			setIsSpeaking(!!msg.speaking);
 			break;
 			}
 		};
@@ -1127,13 +1153,16 @@ function App() {
 				</div>
 			)}
 
-			{/* Recording Indicator */}
-			{(isRecording || isTranscribing) && (
-				<div className={`recording-bar${isTranscribing ? ' transcribing' : ''}`}>
+			{/* Recording / Speaking Indicator */}
+			{(isRecording || isTranscribing || isSpeaking) && (
+				<div className={`recording-bar${isTranscribing ? ' transcribing' : ''}${isSpeaking ? ' speaking' : ''}`}>
 					<span className="recording-bar-dot" />
-					<span>{isTranscribing ? '识别中...' : `录音中 ${Math.floor(recordingDuration / 60).toString().padStart(2, '0')}:${(recordingDuration % 60).toString().padStart(2, '0')}`}</span>
+					<span>{isSpeaking ? '播报中...' : isTranscribing ? '识别中...' : `录音中 ${Math.floor(recordingDuration / 60).toString().padStart(2, '0')}:${(recordingDuration % 60).toString().padStart(2, '0')}`}{voiceMode ? ' · 语音模式' : ''}</span>
 					{isRecording && (
 						<button className="recording-bar-stop" onClick={handleMicToggle}>停止</button>
+					)}
+					{isSpeaking && (
+						<button className="recording-bar-stop" onClick={() => vscode.postMessage({ type: 'stopSpeaking' })}>停止播报</button>
 					)}
 				</div>
 			)}
@@ -1253,6 +1282,16 @@ function App() {
 								disabled={isTranscribing}
 							>
 								{isTranscribing ? '⏳' : '🎤'}
+							</button>
+							<button
+								className={`btn-toolbar btn-voice-mode${voiceMode ? ' active' : ''}`}
+								onClick={() => {
+									setVoiceMode(v => !v);
+									if (isSpeaking) vscode.postMessage({ type: 'stopSpeaking' });
+								}}
+								title={voiceMode ? '关闭语音模式（自动发送+播报）' : '开启语音模式（自动发送+播报）'}
+							>
+								{voiceMode ? '🔊' : '🔇'}
 							</button>
 						</div>
 						<button

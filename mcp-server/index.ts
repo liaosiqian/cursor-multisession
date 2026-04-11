@@ -19,7 +19,7 @@ const POLL_INTERVAL_MS = 800;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const ORPHAN_THRESHOLD_MS = 30_000;
 const SESSION_EXPIRE_DAYS = 7;
-const MAX_POLL_DURATION_MS = 4 * 60 * 60 * 1000; // 4 hours — return still_waiting to keep loop alive
+const MAX_POLL_DURATION_MS = 3 * 60 * 1000; // 3 min — return still_waiting before Cursor's ~5min recompute kicks in
 
 // ── helpers ──
 
