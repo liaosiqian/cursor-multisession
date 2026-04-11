@@ -260,13 +260,16 @@ server.tool(
 		if (reply && sid) {
 			const summaryPath = path.join(getSessionDir(sid), 'summary.json');
 			writeJson(summaryPath, { text: reply, ts: Date.now() });
-			// also append to chat-log as AI message
 			const logPath = path.join(getSessionDir(sid), 'chat-log.json');
 			const logs = readJson<any[]>(logPath) || [];
 			logs.push({ role: 'assistant', text: reply, ts: Date.now() });
 			writeJson(logPath, logs);
 			log(`[reply] ${sid} summary written`);
 		}
+
+		// mark agent as idle (waiting for next message)
+		const statusPath = path.join(getSessionDir(sid), 'status.json');
+		writeJson(statusPath, { status: 'idle', since: Date.now() });
 
 		// if recovered and queue is empty, immediately tell AI this is a resumed session
 		const queuePath = path.join(getSessionDir(sid), 'queue.json');
@@ -305,6 +308,10 @@ server.tool(
 				}
 
 				writeJson(queuePath, remaining);
+
+				// mark agent as processing
+				const statusPath2 = path.join(getSessionDir(sid), 'status.json');
+				writeJson(statusPath2, { status: 'processing', since: Date.now(), preview: (picked.content || picked.text || '').slice(0, 60) });
 
 				const logPath = path.join(getSessionDir(sid), 'chat-log.json');
 				const logs = readJson<any[]>(logPath) || [];

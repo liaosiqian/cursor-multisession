@@ -96,6 +96,7 @@ function App() {
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [keepAlive, setKeepAlive] = useState(false);
 	const [undeliveredSessions, setUndeliveredSessions] = useState<Set<string>>(new Set());
+	const [agentStatusMap, setAgentStatusMap] = useState<Record<string, { status: string; since: number; preview?: string }>>({});
 	const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
 	const lastUserActivityRef = useRef(Date.now());
 	const settingsRef = useRef<HTMLDivElement>(null);
@@ -228,9 +229,37 @@ function App() {
 				case 'rulePrompt':
 					setRulePrompt(msg.data);
 					break;
-				case 'sharedFile':
-					setSharedFiles(prev => [...prev, msg.data]);
+				case 'sharedFile': {
+					const f = msg.data;
+					if (f?.path && editorRef.current) {
+						const editor = editorRef.current;
+						editor.focus();
+						const chip = document.createElement('span');
+						chip.contentEditable = 'false';
+						chip.dataset.chipPath = f.path;
+						chip.dataset.chipName = f.name;
+						chip.className = 'inline-chip chip-file';
+						chip.textContent = `📄 ${f.name}`;
+						const sel = window.getSelection();
+						if (sel && sel.rangeCount) {
+							const range = sel.getRangeAt(0);
+							range.collapse(false);
+							range.insertNode(chip);
+							const space = document.createTextNode('\u00A0');
+							chip.after(space);
+							const r = document.createRange();
+							r.setStartAfter(space);
+							r.collapse(true);
+							sel.removeAllRanges();
+							sel.addRange(r);
+						} else {
+							editor.appendChild(chip);
+							editor.appendChild(document.createTextNode('\u00A0'));
+						}
+						setInputText(editor.textContent || '');
+					}
 					break;
+				}
 				case 'inquiry':
 					if (msg.data && !msg.data.answered) {
 						setInquiryMap(prev => ({ ...prev, [msg.sessionId]: msg.data }));
@@ -286,6 +315,11 @@ function App() {
 				break;
 		case 'extensionInfo':
 			if (msg.version) setExtVersion(msg.version);
+			break;
+		case 'agentStatus':
+			if (msg.data) {
+				setAgentStatusMap(prev => ({ ...prev, [msg.sessionId]: msg.data }));
+			}
 			break;
 		case 'messageNotDelivered':
 			setUndeliveredSessions(prev => new Set(prev).add(msg.sessionId));
@@ -696,29 +730,29 @@ function App() {
 					<span className="topbar-title">MultiSession</span>
 				</div>
 			<div className="topbar-right">
-			<button className="btn-small" onClick={handleCopyRule} data-tooltip="复制通信规则到剪贴板（粘贴到新 Composer 启动会话）" data-tooltip-pos="left">
+			<button className="btn-small" onClick={handleCopyRule} data-tooltip="复制通信规则到剪贴板" data-tooltip-pos="below">
 				规则
 			</button>
 			<button
 				className={`btn-small ${keepAlive ? 'btn-active' : ''}`}
 				onClick={() => { setKeepAlive(prev => !prev); lastUserActivityRef.current = Date.now(); }}
-				data-tooltip={keepAlive ? '保活已开启（每5分钟自动心跳）' : '开启保活（防止会话超时断开）'}
-				data-tooltip-pos="left"
+				data-tooltip={keepAlive ? '保活已开启' : '开启保活'}
+				data-tooltip-pos="below"
 			>
 				{keepAlive ? '♥' : '♡'}
 			</button>
-			<button className="btn-small btn-accent" onClick={handleReconnect} data-tooltip="重连 Composer（断开时使用）" data-tooltip-pos="left">
+			<button className="btn-small btn-accent" onClick={handleReconnect} data-tooltip="重连 Composer" data-tooltip-pos="below">
 				重连
 			</button>
 				{totalPending > 0 && (
-					<span className="badge">{totalPending}</span>
+					<span className="badge" data-tooltip={`${totalPending} 条待处理`} data-tooltip-pos="below">{totalPending}</span>
 				)}
 				<div className="settings-wrapper" ref={settingsRef}>
 					<button
 						className="btn-small btn-icon"
 						onClick={() => setSettingsOpen(prev => !prev)}
 						data-tooltip="设置"
-						data-tooltip-pos="left"
+						data-tooltip-pos="below"
 					>
 						⚙
 					</button>
@@ -974,6 +1008,12 @@ function App() {
 						))}
 					</div>
 				)}
+				{agentStatusMap[activeSessionId]?.status === 'processing' && (
+					<div className="agent-processing">
+						<span className="agent-processing-dot" />
+						<span>Agent 正在处理中...</span>
+					</div>
+				)}
 				<div ref={messagesEndRef} />
 			</div>
 
@@ -1148,7 +1188,6 @@ function App() {
 					</div>
 				</div>
 			</div>
-			<div className="version-footer">v{extVersion}</div>
 		</div>
 	);
 }

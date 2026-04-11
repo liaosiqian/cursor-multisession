@@ -521,6 +521,11 @@ function tick() {
 			if (progress) {
 				panel.webview.postMessage({ type: 'progress', sessionId: s.id, data: progress });
 			}
+
+			const agentStatus = readJson(path.join(dir, 'status.json'));
+			if (agentStatus) {
+				panel.webview.postMessage({ type: 'agentStatus', sessionId: s.id, data: agentStatus });
+			}
 		}
 	} catch (err) {
 		output.appendLine(`[tick] error: ${err}`);
