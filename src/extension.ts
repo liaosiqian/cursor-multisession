@@ -237,9 +237,10 @@ function stopSpeaking(): void {
 	if (ttsProcess) {
 		ttsProcess.kill();
 		ttsProcess = null;
-		panel?.webview.postMessage({ type: 'ttsState', speaking: false });
 		output.appendLine('[tts] stopped');
 	}
+	try { execSync('killall say 2>/dev/null', { stdio: 'ignore' }); } catch { /* no say running */ }
+	panel?.webview.postMessage({ type: 'ttsState', speaking: false });
 }
 
 // ── 通信规则提示词（粘贴到 Composer 用） ──

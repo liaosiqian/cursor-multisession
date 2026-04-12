@@ -104,6 +104,7 @@ function App() {
 	const [isSpeaking, setIsSpeaking] = useState(false);
 	const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 	const voiceModeRef = useRef(false);
+	const lastSpokenTextRef = useRef<string>('');
 	const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
 	const lastUserActivityRef = useRef(Date.now());
 	const settingsRef = useRef<HTMLDivElement>(null);
@@ -221,15 +222,18 @@ function App() {
 					setSessions(msg.data || []);
 					break;
 				case 'syncLogs': {
-				const prevLogs = logsMap[msg.sessionId] || [];
 				const newLogs: ChatMessage[] = msg.data || [];
-				setLogsMap(prev => ({ ...prev, [msg.sessionId]: newLogs }));
-				if (voiceModeRef.current && msg.sessionId === activeSessionId && newLogs.length > prevLogs.length) {
-					const latest = newLogs[newLogs.length - 1];
-					if (latest && latest.role === 'assistant' && latest.text) {
-						vscode.postMessage({ type: 'speakText', text: latest.text });
+				setLogsMap(prev => {
+					const prevLogs = prev[msg.sessionId] || [];
+					if (voiceModeRef.current && msg.sessionId === activeSessionId && newLogs.length > prevLogs.length) {
+						const latest = newLogs[newLogs.length - 1];
+						if (latest && latest.role === 'assistant' && latest.text && latest.text !== lastSpokenTextRef.current) {
+							lastSpokenTextRef.current = latest.text;
+							vscode.postMessage({ type: 'speakText', text: latest.text });
+						}
 					}
-				}
+					return { ...prev, [msg.sessionId]: newLogs };
+				});
 				break;
 			}
 			case 'pendingCount':
@@ -1286,8 +1290,13 @@ function App() {
 							<button
 								className={`btn-toolbar btn-voice-mode${voiceMode ? ' active' : ''}`}
 								onClick={() => {
-									setVoiceMode(v => !v);
-									if (isSpeaking) vscode.postMessage({ type: 'stopSpeaking' });
+									const next = !voiceMode;
+									setVoiceMode(next);
+									voiceModeRef.current = next;
+									if (!next) {
+										lastSpokenTextRef.current = '';
+										if (isSpeaking) vscode.postMessage({ type: 'stopSpeaking' });
+									}
 								}}
 								title={voiceMode ? '关闭语音模式（自动发送+播报）' : '开启语音模式（自动发送+播报）'}
 							>
