@@ -11,10 +11,15 @@ const ACTIVE_WINDOW_FILE = path.join(DATA_ROOT, 'active-window.json');
 
 const POLL_INTERVAL_MS = 500;
 const RECONNECT_COOLDOWN_MS = 5_000;
+// active-window.json 心跳续期间隔 + 过期阈值。
+// MCP 通过该文件 claim 自己所属的 Cursor 窗口,必须持续续期证明窗口存活。
+const WINDOW_HEARTBEAT_MS = 3_000;
+const WINDOW_STALE_MS = 15_000;
 
 const currentWindowToken = `w-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 let panel: vscode.WebviewView | undefined;
 let pollTimer: NodeJS.Timeout | undefined;
+let windowHeartbeatTimer: NodeJS.Timeout | undefined;
 let lastReconnectAttempt = 0;
 let output: vscode.OutputChannel;
 let EXT_VERSION = '?';
@@ -259,6 +264,7 @@ function generateRulePrompt(): string {
 7. \`check_messages\` 的 \`reply\` 参数：传入本轮回复的摘要/结论（Markdown），插件界面会展示给用户。无需总结时可省略
 8. 可以使用 subagent 执行搜索、分析等独立任务，但 check_messages、ask_question、export_chat 必须由主 Agent 调用，subagent 不得调用
 9. 如果工具因异常返回/报错，且用户未要求结束对话，必须立刻再次调用对应工具继续等待
+10. **子代理模型（严禁降级）**：启动子代理（Task 工具）时，**严禁**传入 \`model\` 参数（不传 = 继承主 Agent 当前模型）。唯一例外：纯机械操作（批量重命名、简单替换）可传 \`model: "fast"\`。涉及代码搜索、分析、修改、生成、测试的任务 **一律禁止指定 model**
 
 ---
 **回合结束（强制）**: 回复完整输出完毕后，最后一步必须调用 MultiSession MCP 的 \`check_messages\` 工具。`;
@@ -282,6 +288,7 @@ function generateResumeRulePrompt(sessionId: string, sessionName: string): strin
 7. \`check_messages\` 的 \`reply\` 参数：传入本轮回复的摘要/结论（Markdown），插件界面会展示给用户
 8. check_messages、ask_question、export_chat 必须由主 Agent 调用，subagent 不得调用
 9. 如果工具因异常返回/报错，必须立刻再次调用对应工具继续等待
+10. **子代理模型（严禁降级）**：启动子代理（Task 工具）时，**严禁**传入 \`model\` 参数（不传 = 继承主 Agent 当前模型）。唯一例外：纯机械操作（批量重命名、简单替换）可传 \`model: "fast"\`。涉及代码搜索、分析、修改、生成、测试的任务 **一律禁止指定 model**
 
 ---
 **回合结束（强制）**: 回复完整输出完毕后，最后一步必须调用 check_messages(session_id="${sessionId}")。`;
@@ -298,6 +305,9 @@ alwaysApply: true
 > **SUBAGENT 专属指令（通过 Task 工具启动的子代理必读）**
 > 你是 subagent（子代理），**严禁调用任何 MultiSession MCP 工具**，包括 \`check_messages\`、\`ask_question\`、\`export_chat\`。这些工具只能由主 Agent 调用。你完成任务后直接返回结果即可。下方所有规则均仅适用于主 Agent，与你无关。
 
+> **子代理模型策略（主 Agent 必读，严禁降级）**
+> 启动子代理（Task 工具）时，**严禁**传入 \`model\` 参数（不传 = 自动继承主 Agent 当前模型）。**唯一例外**：纯机械操作（批量文件重命名、简单文本替换）可传 \`model: "fast"\`。凡涉及代码搜索、分析、修改、生成、测试、文档编写的任务，**一律禁止指定 model 参数**。违反此规则会导致任务质量下降。
+
 # MCP 工具调用规则（仅主 Agent 适用）
 
 以下规则**仅适用于主 Agent**，subagent **必须忽略以下所有规则**，完成任务后直接返回结果。
@@ -313,6 +323,7 @@ alwaysApply: true
 9. **严禁 subagent 调用 MultiSession MCP 工具**。check_messages、ask_question、export_chat 必须且只能由主 Agent 调用
 10. 如果工具因异常返回/报错，且用户未要求结束对话，必须立刻再次调用对应工具继续等待
 11. \`export_chat\` 仅当用户要求"导出对话"时才调用
+12. **子代理模型（严禁降级）**：启动子代理（Task 工具）时，**严禁**传入 \`model\` 参数。唯一例外：纯机械操作可传 \`model: "fast"\`。涉及代码搜索/分析/修改/生成/测试 **一律禁止指定 model**
 
 ---
 **回合结束（强制，仅主 Agent）**: 回复完整输出完毕后，最后一步必须调用 MultiSession MCP 的 \`check_messages\` 工具。subagent 完成任务后直接返回结果，不调用任何 MultiSession MCP 工具。
@@ -344,22 +355,66 @@ function getWorkspacePaths(): string[] {
 
 // ── window token ──
 
+interface WindowEntry {
+	token: string;
+	timestamp: number;
+	pid: number;
+}
+
+function isPidAlive(pid: number): boolean {
+	if (!pid || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (e: any) {
+		// EPERM 表示进程存在但无权限发送信号,视为存活。
+		return e && e.code === 'EPERM';
+	}
+}
+
 function markThisWindowActive() {
 	const wsPaths = getWorkspacePaths();
 	if (wsPaths.length === 0) return;
-	const data = readJson<Record<string, { token: string; timestamp: number }[]>>(ACTIVE_WINDOW_FILE) || {};
+	const data = readJson<Record<string, WindowEntry[]>>(ACTIVE_WINDOW_FILE) || {};
 	const now = Date.now();
+	const myPid = process.pid;
 	for (const ws of wsPaths) {
 		const entries = data[ws] || [];
-		const existing = entries.find(e => e.token === currentWindowToken);
+		// 剔除:过期 + 死进程 + 与当前 pid 相同但 token 不同(防止重启残留)
+		const filtered = entries.filter(e => {
+			if (!e || !e.token || !e.pid) return false;
+			if ((now - e.timestamp) > WINDOW_STALE_MS) return false;
+			if (!isPidAlive(e.pid)) return false;
+			if (e.pid === myPid && e.token !== currentWindowToken) return false;
+			return true;
+		});
+		const existing = filtered.find(e => e.token === currentWindowToken);
 		if (existing) {
 			existing.timestamp = now;
+			existing.pid = myPid;
 		} else {
-			entries.unshift({ token: currentWindowToken, timestamp: now });
+			filtered.unshift({ token: currentWindowToken, timestamp: now, pid: myPid });
 		}
-		data[ws] = entries.slice(0, 8);
+		data[ws] = filtered.slice(0, 8);
 	}
 	writeJson(ACTIVE_WINDOW_FILE, data);
+}
+
+function removeThisWindowActive() {
+	try {
+		const data = readJson<Record<string, WindowEntry[]>>(ACTIVE_WINDOW_FILE);
+		if (!data) return;
+		let changed = false;
+		for (const ws of Object.keys(data)) {
+			const before = data[ws] || [];
+			const after = before.filter(e => e.token !== currentWindowToken);
+			if (after.length !== before.length) {
+				data[ws] = after;
+				changed = true;
+			}
+		}
+		if (changed) writeJson(ACTIVE_WINDOW_FILE, data);
+	} catch { /* ignore */ }
 }
 
 // ── session filtering ──
@@ -2031,6 +2086,9 @@ export function activate(ctx: vscode.ExtensionContext) {
 
 	// start polling
 	pollTimer = setInterval(tick, POLL_INTERVAL_MS);
+	// 持续续期 active-window,MCP 子进程靠这个判定"哪些窗口还活着"。
+	windowHeartbeatTimer = setInterval(markThisWindowActive, WINDOW_HEARTBEAT_MS);
+	output.appendLine(`[activate] window token = ${currentWindowToken} pid = ${process.pid}`);
 	output.appendLine('[activate] polling started');
 	output.appendLine(`[activate] done — v${EXT_VERSION} ready`);
 }
@@ -2040,6 +2098,11 @@ export function deactivate() {
 		clearInterval(pollTimer);
 		pollTimer = undefined;
 	}
+	if (windowHeartbeatTimer) {
+		clearInterval(windowHeartbeatTimer);
+		windowHeartbeatTimer = undefined;
+	}
+	removeThisWindowActive();
 	for (const entry of accounts.values()) {
 		if (entry.engine) {
 			try { entry.engine.disconnect(); } catch {}
