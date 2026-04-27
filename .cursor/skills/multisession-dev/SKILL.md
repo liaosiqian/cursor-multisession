@@ -22,7 +22,7 @@ description: >-
 **任何代码修改后，必须执行以下流程部署到 Cursor。严禁手动复制 dist 文件。**
 
 ```bash
-cd /Users/lsq/AIProjects/cursor-multisession
+cd <repo-root>
 
 # 标准部署（不改版本号）
 npm run deploy
