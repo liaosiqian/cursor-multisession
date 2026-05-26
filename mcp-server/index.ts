@@ -40,6 +40,11 @@ const MCP_CLAIM_STALE_MS = 30_000;
 
 const MCP_PID = process.pid;
 
+// 追踪当前正在被 check_messages 长轮询占用的 session。
+// 用于防止 tryAdoptOrphan 将"另一个 Compose 正在使用的 session"分配给新 Compose。
+// Node.js 单线程 + 同进程内存 → 无需文件锁。
+const activelyPolledSessions = new Set<string>();
+
 // ── helpers ──
 
 function ensureDir(dir: string) {
@@ -213,9 +218,11 @@ function tryAdoptOrphan(workspace: string, windowToken: string | null): string |
 	if (wsSessions.length === 0) return null;
 
 	// Phase 1: 严格 windowToken 匹配——同窗口内 mode-switch / 重启 MCP 走这里恢复。
+	// 排除 activelyPolledSessions: 如果 session 正被另一个 check_messages 调用轮询,
+	// 说明它已有对应 Compose,当前调用来自一个新 Compose,应创建新 session。
 	if (windowToken) {
 		const tokenMatches = wsSessions
-			.filter(s => s.windowToken === windowToken)
+			.filter(s => s.windowToken === windowToken && !activelyPolledSessions.has(s.id))
 			.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
 		if (tokenMatches.length > 0) {
 			log(`[adopt] recovered session ${tokenMatches[0].id} (windowToken match, age=${now - tokenMatches[0].lastActiveAt}ms)`);
@@ -232,8 +239,8 @@ function tryAdoptOrphan(workspace: string, windowToken: string | null): string |
 	const activeTokens = new Set(readActiveWindows(workspace).map(w => w.token));
 	const orphans = wsSessions
 		.filter(s => {
+			if (activelyPolledSessions.has(s.id)) return false;
 			if ((now - s.lastActiveAt) <= ORPHAN_THRESHOLD_MS) return false;
-			// session 原 windowToken 对应的窗口仍活着 → 它还有主,别抢
 			if (s.windowToken && activeTokens.has(s.windowToken)) return false;
 			return true;
 		})
@@ -400,6 +407,13 @@ server.tool(
 			cleanupExpiredSessions();
 		}
 
+		// 标记此 session 为"正在被轮询"，防止其他 check_messages 调用通过
+		// tryAdoptOrphan 将同一 session 分配给不同的 Compose 面板。
+		activelyPolledSessions.add(sid);
+		log(`[poll-lock] ${sid} locked (active=${activelyPolledSessions.size})`);
+
+		try {
+
 		// write reply summary if provided
 		if (reply && sid) {
 			const summaryPath = path.join(getSessionDir(sid), 'summary.json');
@@ -557,15 +571,20 @@ server.tool(
 			await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
 		}
 
-	// still_waiting — keep the loop alive without breaking the session
-	touchSession(sid);
-	touchMcpClaim();
-	return {
-		content: [{
-			type: 'text' as const,
-			text: `[session_id: ${sid}]\n\n{"status":"still_waiting"}\n暂无新消息。请立刻再次调用 check_messages(session_id="${sid}") 保持连接，不要输出任何文字。`,
-		}],
-	};
+		// still_waiting — keep the loop alive without breaking the session
+		touchSession(sid);
+		touchMcpClaim();
+		return {
+			content: [{
+				type: 'text' as const,
+				text: `[session_id: ${sid}]\n\n{"status":"still_waiting"}\n暂无新消息。请立刻再次调用 check_messages(session_id="${sid}") 保持连接，不要输出任何文字。`,
+			}],
+		};
+
+		} finally {
+			activelyPolledSessions.delete(sid);
+			log(`[poll-lock] ${sid} unlocked (active=${activelyPolledSessions.size})`);
+		}
 	}
 );
 

@@ -304,6 +304,20 @@ body {
 	border-radius: 2px;
 }
 
+.load-more-hint {
+	text-align: center;
+	padding: 6px 0;
+	font-size: 11px;
+	color: var(--accent);
+	cursor: pointer;
+	opacity: 0.8;
+}
+
+.load-more-hint:hover {
+	opacity: 1;
+	text-decoration: underline;
+}
+
 .empty-state {
 	display: flex;
 	flex-direction: column;
@@ -710,6 +724,8 @@ body {
 	border-top: 1px solid var(--border);
 	background: rgba(0, 120, 212, 0.05);
 	flex-shrink: 0;
+	max-height: 40vh;
+	overflow-y: auto;
 }
 
 .inquiry-label {

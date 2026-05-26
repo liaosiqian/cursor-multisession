@@ -262,9 +262,7 @@ function generateRulePrompt(): string {
 5. 需要用户做选择或确认时，必须调用 \`ask_question\`；严禁使用 Cursor 内置的 ask_user_question
 6. \`ask_question\` 收到用户回答后，处理完毕仍需调用 \`check_messages\` 继续监听
 7. \`check_messages\` 的 \`reply\` 参数：传入本轮回复的摘要/结论（Markdown），插件界面会展示给用户。无需总结时可省略
-8. 可以使用 subagent 执行搜索、分析等独立任务，但 check_messages、ask_question、export_chat 必须由主 Agent 调用，subagent 不得调用
-9. 如果工具因异常返回/报错，且用户未要求结束对话，必须立刻再次调用对应工具继续等待
-10. **子代理模型（严禁降级）**：启动子代理（Task 工具）时，**严禁**传入 \`model\` 参数（不传 = 继承主 Agent 当前模型）。唯一例外：纯机械操作（批量重命名、简单替换）可传 \`model: "fast"\`。涉及代码搜索、分析、修改、生成、测试的任务 **一律禁止指定 model**
+8. 如果工具因异常返回/报错，且用户未要求结束对话，必须立刻再次调用对应工具继续等待
 
 ---
 **回合结束（强制）**: 回复完整输出完毕后，最后一步必须调用 MultiSession MCP 的 \`check_messages\` 工具。`;
@@ -286,15 +284,13 @@ function generateResumeRulePrompt(sessionId: string, sessionName: string): strin
 5. 需要用户做选择或确认时，必须调用 \`ask_question\`；严禁使用 Cursor 内置的 ask_user_question
 6. \`ask_question\` 收到用户回答后，处理完毕仍需调用 \`check_messages\` 继续监听
 7. \`check_messages\` 的 \`reply\` 参数：传入本轮回复的摘要/结论（Markdown），插件界面会展示给用户
-8. check_messages、ask_question、export_chat 必须由主 Agent 调用，subagent 不得调用
-9. 如果工具因异常返回/报错，必须立刻再次调用对应工具继续等待
-10. **子代理模型（严禁降级）**：启动子代理（Task 工具）时，**严禁**传入 \`model\` 参数（不传 = 继承主 Agent 当前模型）。唯一例外：纯机械操作（批量重命名、简单替换）可传 \`model: "fast"\`。涉及代码搜索、分析、修改、生成、测试的任务 **一律禁止指定 model**
+8. 如果工具因异常返回/报错，必须立刻再次调用对应工具继续等待
 
 ---
 **回合结束（强制）**: 回复完整输出完毕后，最后一步必须调用 check_messages(session_id="${sessionId}")。`;
 }
 
-// ── Cursor Rule 文件内容（自动注入，含 subagent 限制） ──
+// ── Cursor Rule 文件内容（自动注入） ──
 
 const CURSOR_RULE_CONTENT = `---
 description: MultiSession 多会话通信规则，自动注入到所有对话中。
@@ -302,15 +298,7 @@ globs:
 alwaysApply: true
 ---
 
-> **SUBAGENT 专属指令（通过 Task 工具启动的子代理必读）**
-> 你是 subagent（子代理），**严禁调用任何 MultiSession MCP 工具**，包括 \`check_messages\`、\`ask_question\`、\`export_chat\`。这些工具只能由主 Agent 调用。你完成任务后直接返回结果即可。下方所有规则均仅适用于主 Agent，与你无关。
-
-> **子代理模型策略（主 Agent 必读，严禁降级）**
-> 启动子代理（Task 工具）时，**严禁**传入 \`model\` 参数（不传 = 自动继承主 Agent 当前模型）。**唯一例外**：纯机械操作（批量文件重命名、简单文本替换）可传 \`model: "fast"\`。凡涉及代码搜索、分析、修改、生成、测试、文档编写的任务，**一律禁止指定 model 参数**。违反此规则会导致任务质量下降。
-
-# MCP 工具调用规则（仅主 Agent 适用）
-
-以下规则**仅适用于主 Agent**，subagent **必须忽略以下所有规则**，完成任务后直接返回结果。
+# MCP 工具调用规则
 
 1. 每轮对话回复**完整输出后**，最后一步必须调用 \`check_messages\`，适用于 Agent/Plan/Debug/Ask 所有模式，无一例外
 2. \`check_messages\` 会持续等待直到用户发来新消息；收到后处理并回复，然后再次调用 \`check_messages\`，形成永续循环
@@ -320,13 +308,11 @@ alwaysApply: true
 6. \`ask_question\` 参数格式: \`{ "session_id": "xxx", "questions": [{ "question": "问题文本", "options": [{ "id": "a", "label": "选项A" }], "allow_multiple": false }] }\`
 7. \`ask_question\` 收到回答后，处理完毕仍需调用 \`check_messages\` 继续监听
 8. \`check_messages\` 的 \`reply\` 参数：传入本轮回复的**摘要/结论**（Markdown），不是完整正文
-9. **严禁 subagent 调用 MultiSession MCP 工具**。check_messages、ask_question、export_chat 必须且只能由主 Agent 调用
-10. 如果工具因异常返回/报错，且用户未要求结束对话，必须立刻再次调用对应工具继续等待
-11. \`export_chat\` 仅当用户要求"导出对话"时才调用
-12. **子代理模型（严禁降级）**：启动子代理（Task 工具）时，**严禁**传入 \`model\` 参数。唯一例外：纯机械操作可传 \`model: "fast"\`。涉及代码搜索/分析/修改/生成/测试 **一律禁止指定 model**
+9. 如果工具因异常返回/报错，且用户未要求结束对话，必须立刻再次调用对应工具继续等待
+10. \`export_chat\` 仅当用户要求"导出对话"时才调用
 
 ---
-**回合结束（强制，仅主 Agent）**: 回复完整输出完毕后，最后一步必须调用 MultiSession MCP 的 \`check_messages\` 工具。subagent 完成任务后直接返回结果，不调用任何 MultiSession MCP 工具。
+**回合结束（强制）**: 回复完整输出完毕后，最后一步必须调用 MultiSession MCP 的 \`check_messages\` 工具。
 `;
 
 // ── helpers ──
@@ -429,12 +415,18 @@ interface SessionMeta {
 	lastActiveAt: number;
 }
 
+const ARCHIVE_AFTER_DAYS = 3;
+const ARCHIVE_THRESHOLD_MS = ARCHIVE_AFTER_DAYS * 24 * 60 * 60 * 1000;
+
 function getSessionsForThisWorkspace(): SessionMeta[] {
 	const sessions = readJson<SessionMeta[]>(SESSIONS_FILE) || [];
 	const wsPaths = getWorkspacePaths().map(normalizePathForCompare);
+	const now = Date.now();
 	return sessions.filter(s => {
 		if (!s.workspace) return true;
-		return wsPaths.some(wp => normalizePathForCompare(s.workspace) === wp);
+		if (!wsPaths.some(wp => normalizePathForCompare(s.workspace) === wp)) return false;
+		if (!s.alive && (now - s.lastActiveAt) > ARCHIVE_THRESHOLD_MS) return false;
+		return true;
 	});
 }
 
@@ -770,9 +762,11 @@ function tick() {
 		for (const s of sessions) {
 			const dir = path.join(SESSIONS_DIR, s.id);
 
-			const logs = readJson(path.join(dir, 'chat-log.json'));
+			const logs = readJson<any[]>(path.join(dir, 'chat-log.json'));
 			if (logs) {
-				panel.webview.postMessage({ type: 'syncLogs', sessionId: s.id, data: logs });
+				const MAX_VISIBLE_LOGS = 50;
+				const trimmed = logs.length > MAX_VISIBLE_LOGS ? logs.slice(-MAX_VISIBLE_LOGS) : logs;
+				panel.webview.postMessage({ type: 'syncLogs', sessionId: s.id, data: trimmed, totalCount: logs.length });
 			}
 
 			const queue = readJson<any[]>(path.join(dir, 'queue.json'));
@@ -1407,6 +1401,25 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 						logs.splice(msg.msgIndex, 1);
 						writeJson(logPath, logs);
 						output.appendLine(`[msg] deleted index ${msg.msgIndex} from ${msg.sessionId}`);
+					}
+					break;
+				}
+
+				case 'loadMoreLogs': {
+					const logPath2 = path.join(SESSIONS_DIR, msg.sessionId, 'chat-log.json');
+					const allLogs = readJson<any[]>(logPath2) || [];
+					const currentCount: number = msg.currentCount || 0;
+					const PAGE_SIZE = 50;
+					const remaining = allLogs.length - currentCount;
+					if (remaining > 0) {
+						const start = Math.max(0, remaining - PAGE_SIZE);
+						const older = allLogs.slice(start, remaining);
+						panel?.webview.postMessage({
+							type: 'prependLogs',
+							sessionId: msg.sessionId,
+							data: older,
+							totalCount: allLogs.length,
+						});
 					}
 					break;
 				}

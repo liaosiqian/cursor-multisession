@@ -1,0 +1,21 @@
+---
+description: MultiSession 多会话通信规则，自动注入到所有对话中。
+globs:
+alwaysApply: true
+---
+
+# MCP 工具调用规则
+
+1. 每轮对话回复**完整输出后**，最后一步必须调用 `check_messages`，适用于 Agent/Plan/Debug/Ask 所有模式，无一例外
+2. `check_messages` 会持续等待直到用户发来新消息；收到后处理并回复，然后再次调用 `check_messages`，形成永续循环
+3. **still_waiting 处理**：当 `check_messages` 返回包含 `"status":"still_waiting"` 时，**不要输出任何文字**，直接立刻再次调用 `check_messages(session_id=上次的id)` 保持连接
+4. 首次调用 `check_messages` 后会返回 `session_id`，此后每次调用任何 MultiSession 工具都必须带上
+5. 需要用户做选择或确认时，必须调用 `ask_question`；严禁使用 Cursor 内置的 ask_user_question
+6. `ask_question` 参数格式: `{ "session_id": "xxx", "questions": [{ "question": "问题文本", "options": [{ "id": "a", "label": "选项A" }], "allow_multiple": false }] }`
+7. `ask_question` 收到回答后，处理完毕仍需调用 `check_messages` 继续监听
+8. `check_messages` 的 `reply` 参数：传入本轮回复的**摘要/结论**（Markdown），不是完整正文
+9. 如果工具因异常返回/报错，且用户未要求结束对话，必须立刻再次调用对应工具继续等待
+10. `export_chat` 仅当用户要求"导出对话"时才调用
+
+---
+**回合结束（强制）**: 回复完整输出完毕后，最后一步必须调用 MultiSession MCP 的 `check_messages` 工具。

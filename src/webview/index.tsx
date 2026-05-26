@@ -97,6 +97,8 @@ function App() {
 	const [keepAlive, setKeepAlive] = useState(false);
 	const [undeliveredSessions, setUndeliveredSessions] = useState<Set<string>>(new Set());
 	const [agentStatusMap, setAgentStatusMap] = useState<Record<string, { status: string; since: number; preview?: string }>>({});
+	const [totalCountMap, setTotalCountMap] = useState<Record<string, number>>({});
+	const loadingMoreRef = useRef(false);
 	const [isRecording, setIsRecording] = useState(false);
 	const [isTranscribing, setIsTranscribing] = useState(false);
 	const [recordingDuration, setRecordingDuration] = useState(0);
@@ -168,17 +170,25 @@ function App() {
 		return () => document.removeEventListener('click', onClick, true);
 	}, [settingsOpen]);
 
-	// track user scroll position
+	// track user scroll position + load more on scroll to top
 	useEffect(() => {
 		const el = messageLogRef.current;
 		if (!el) return;
 		const onScroll = () => {
 			const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
 			userScrolledUp.current = !atBottom;
+			if (el.scrollTop < 60 && !loadingMoreRef.current) {
+				const currentLogs = logsMap[activeSessionId] || [];
+				const total = totalCountMap[activeSessionId] || 0;
+				if (currentLogs.length < total) {
+					loadingMoreRef.current = true;
+					vscode.postMessage({ type: 'loadMoreLogs', sessionId: activeSessionId, currentCount: currentLogs.length });
+				}
+			}
 		};
 		el.addEventListener('scroll', onScroll, { passive: true });
 		return () => el.removeEventListener('scroll', onScroll);
-	}, []);
+	}, [activeSessionId, logsMap, totalCountMap]);
 
 	// auto-scroll only when new messages arrive AND user is at bottom
 	useEffect(() => {
@@ -223,6 +233,9 @@ function App() {
 					break;
 				case 'syncLogs': {
 				const newLogs: ChatMessage[] = msg.data || [];
+				if (msg.totalCount !== undefined) {
+					setTotalCountMap(prev => ({ ...prev, [msg.sessionId]: msg.totalCount }));
+				}
 				setLogsMap(prev => {
 					const prevLogs = prev[msg.sessionId] || [];
 					if (voiceModeRef.current && msg.sessionId === activeSessionId && newLogs.length > prevLogs.length) {
@@ -234,6 +247,18 @@ function App() {
 					}
 					return { ...prev, [msg.sessionId]: newLogs };
 				});
+				break;
+			}
+			case 'prependLogs': {
+				const older: ChatMessage[] = msg.data || [];
+				if (msg.totalCount !== undefined) {
+					setTotalCountMap(prev => ({ ...prev, [msg.sessionId]: msg.totalCount }));
+				}
+				setLogsMap(prev => {
+					const existing = prev[msg.sessionId] || [];
+					return { ...prev, [msg.sessionId]: [...older, ...existing] };
+				});
+				loadingMoreRef.current = false;
 				break;
 			}
 			case 'pendingCount':
@@ -1005,6 +1030,16 @@ function App() {
 						</button>
 					</div>
 					<p className="onboarding-hint">请参考下方「使用教程」了解更多</p>
+				</div>
+			)}
+		{currentLogs.length < (totalCountMap[activeSessionId] || 0) && (
+				<div className="load-more-hint" onClick={() => {
+					if (!loadingMoreRef.current) {
+						loadingMoreRef.current = true;
+						vscode.postMessage({ type: 'loadMoreLogs', sessionId: activeSessionId, currentCount: currentLogs.length });
+					}
+				}}>
+					↑ 加载更多历史消息 ({(totalCountMap[activeSessionId] || 0) - currentLogs.length} 条)
 				</div>
 			)}
 		{currentLogs.map((msg, i) => (
