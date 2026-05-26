@@ -229,15 +229,31 @@ function App() {
 			const msg = e.data;
 			switch (msg.type) {
 				case 'sessions':
-					setSessions(msg.data || []);
+					setSessions(prev => {
+						const next = msg.data || [];
+						if (prev.length === next.length && prev.every((s: SessionMeta, i: number) =>
+							s.id === next[i].id && s.name === next[i].name && s.alive === next[i].alive && s.lastActiveAt === next[i].lastActiveAt
+						)) return prev;
+						return next;
+					});
 					break;
 				case 'syncLogs': {
 				const newLogs: ChatMessage[] = msg.data || [];
 				if (msg.totalCount !== undefined) {
-					setTotalCountMap(prev => ({ ...prev, [msg.sessionId]: msg.totalCount }));
+					setTotalCountMap(prev => {
+						if (prev[msg.sessionId] === msg.totalCount) return prev;
+						return { ...prev, [msg.sessionId]: msg.totalCount };
+					});
 				}
 				setLogsMap(prev => {
 					const prevLogs = prev[msg.sessionId] || [];
+					if (prevLogs.length === newLogs.length && prevLogs.length > 0) {
+						const lastOld = prevLogs[prevLogs.length - 1];
+						const lastNew = newLogs[newLogs.length - 1];
+						if (lastOld.ts === lastNew.ts && lastOld.text === lastNew.text && lastOld.role === lastNew.role) {
+							return prev;
+						}
+					}
 					if (voiceModeRef.current && msg.sessionId === activeSessionId && newLogs.length > prevLogs.length) {
 						const latest = newLogs[newLogs.length - 1];
 						if (latest && latest.role === 'assistant' && latest.text && latest.text !== lastSpokenTextRef.current) {
@@ -252,7 +268,10 @@ function App() {
 			case 'prependLogs': {
 				const older: ChatMessage[] = msg.data || [];
 				if (msg.totalCount !== undefined) {
-					setTotalCountMap(prev => ({ ...prev, [msg.sessionId]: msg.totalCount }));
+					setTotalCountMap(prev => {
+						if (prev[msg.sessionId] === msg.totalCount) return prev;
+						return { ...prev, [msg.sessionId]: msg.totalCount };
+					});
 				}
 				setLogsMap(prev => {
 					const existing = prev[msg.sessionId] || [];
@@ -262,7 +281,12 @@ function App() {
 				break;
 			}
 			case 'pendingCount':
-				setPendingMap(prev => ({ ...prev, [msg.sessionId]: msg.items || [] }));
+				setPendingMap(prev => {
+					const items = msg.items || [];
+					const prevItems = prev[msg.sessionId] || [];
+					if (prevItems.length === items.length && prevItems.length === 0) return prev;
+					return { ...prev, [msg.sessionId]: items };
+				});
 				if (!msg.items || msg.items.length === 0) {
 					setUndeliveredSessions(prev => {
 						if (!prev.has(msg.sessionId)) return prev;
@@ -311,14 +335,25 @@ function App() {
 				}
 				case 'inquiry':
 					if (msg.data && !msg.data.answered) {
-						setInquiryMap(prev => ({ ...prev, [msg.sessionId]: msg.data }));
+						setInquiryMap(prev => {
+							const old = prev[msg.sessionId];
+							if (old && old.id === msg.data.id && old.answered === msg.data.answered) return prev;
+							return { ...prev, [msg.sessionId]: msg.data };
+						});
 					} else {
-						setInquiryMap(prev => { const n = { ...prev }; delete n[msg.sessionId]; return n; });
+						setInquiryMap(prev => {
+							if (!(msg.sessionId in prev)) return prev;
+							const n = { ...prev }; delete n[msg.sessionId]; return n;
+						});
 					}
 					break;
 			case 'summary':
 				if (msg.data?.text) {
-					setSummaryMap(prev => ({ ...prev, [msg.sessionId]: msg.data }));
+					setSummaryMap(prev => {
+						const old = prev[msg.sessionId];
+						if (old && old.text === msg.data.text && old.ts === msg.data.ts) return prev;
+						return { ...prev, [msg.sessionId]: msg.data };
+					});
 				}
 				break;
 			case 'slashResult':
@@ -367,7 +402,11 @@ function App() {
 			break;
 		case 'agentStatus':
 			if (msg.data) {
-				setAgentStatusMap(prev => ({ ...prev, [msg.sessionId]: msg.data }));
+				setAgentStatusMap(prev => {
+					const old = prev[msg.sessionId];
+					if (old && old.status === msg.data.status && old.since === msg.data.since) return prev;
+					return { ...prev, [msg.sessionId]: msg.data };
+				});
 			}
 			break;
 		case 'messageNotDelivered':

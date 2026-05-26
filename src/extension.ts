@@ -750,14 +750,34 @@ function scheduleDeliveryCheck(sessionId: string, msgId: string) {
 	}, DELIVERY_CHECK_DELAY_MS);
 }
 
-// ── poll tick ──
+// ── poll tick (diff-based) ──
+// 缓存上一次推送给 webview 的 JSON 快照，只在数据实际变化时 postMessage，
+// 避免每 500ms 无差别推送 → React 无用 re-render → 渲染开销上升。
+const lastPushed = new Map<string, string>();
+
+function pushIfChanged(key: string, msg: any) {
+	if (!panel) return;
+	const json = JSON.stringify(msg);
+	if (lastPushed.get(key) === json) return;
+	lastPushed.set(key, json);
+	panel.webview.postMessage(msg);
+}
 
 function tick() {
 	if (!panel) return;
 
 	try {
 		const sessions = getSessionsForThisWorkspace();
-		panel.webview.postMessage({ type: 'sessions', data: sessions });
+		pushIfChanged('sessions', { type: 'sessions', data: sessions });
+
+		const activeIds = new Set(sessions.map(s => s.id));
+		// 清理已不存在 session 的缓存
+		for (const key of lastPushed.keys()) {
+			if (key.startsWith('s:')) {
+				const sid = key.split(':')[1];
+				if (!activeIds.has(sid)) lastPushed.delete(key);
+			}
+		}
 
 		for (const s of sessions) {
 			const dir = path.join(SESSIONS_DIR, s.id);
@@ -766,11 +786,11 @@ function tick() {
 			if (logs) {
 				const MAX_VISIBLE_LOGS = 50;
 				const trimmed = logs.length > MAX_VISIBLE_LOGS ? logs.slice(-MAX_VISIBLE_LOGS) : logs;
-				panel.webview.postMessage({ type: 'syncLogs', sessionId: s.id, data: trimmed, totalCount: logs.length });
+				pushIfChanged(`s:${s.id}:logs`, { type: 'syncLogs', sessionId: s.id, data: trimmed, totalCount: logs.length });
 			}
 
 			const queue = readJson<any[]>(path.join(dir, 'queue.json'));
-			panel.webview.postMessage({
+			pushIfChanged(`s:${s.id}:pending`, {
 				type: 'pendingCount',
 				sessionId: s.id,
 				count: queue ? queue.length : 0,
@@ -779,22 +799,22 @@ function tick() {
 
 			const inquiry = readJson(path.join(dir, 'inquiry.json'));
 			if (inquiry) {
-				panel.webview.postMessage({ type: 'inquiry', sessionId: s.id, data: inquiry });
+				pushIfChanged(`s:${s.id}:inquiry`, { type: 'inquiry', sessionId: s.id, data: inquiry });
 			}
 
 			const summary = readJson(path.join(dir, 'summary.json'));
 			if (summary) {
-				panel.webview.postMessage({ type: 'summary', sessionId: s.id, data: summary });
+				pushIfChanged(`s:${s.id}:summary`, { type: 'summary', sessionId: s.id, data: summary });
 			}
 
 			const progress = readJson(path.join(dir, 'progress.json'));
 			if (progress) {
-				panel.webview.postMessage({ type: 'progress', sessionId: s.id, data: progress });
+				pushIfChanged(`s:${s.id}:progress`, { type: 'progress', sessionId: s.id, data: progress });
 			}
 
 			const agentStatus = readJson(path.join(dir, 'status.json'));
 			if (agentStatus) {
-				panel.webview.postMessage({ type: 'agentStatus', sessionId: s.id, data: agentStatus });
+				pushIfChanged(`s:${s.id}:status`, { type: 'agentStatus', sessionId: s.id, data: agentStatus });
 			}
 		}
 	} catch (err) {
@@ -1971,6 +1991,27 @@ export function activate(ctx: vscode.ExtensionContext) {
 	ensureDir(DATA_ROOT);
 	ensureDir(SESSIONS_DIR);
 	ensureDir(path.join(SESSIONS_DIR, 'default'));
+
+	// 多文件夹工作区去重：只在第一个 folder 保留 MultiSession MCP 配置，
+	// 清理其余 folder 的重复配置，防止 Cursor 为同一 MCP 启动多个子进程。
+	const wsPaths = getWorkspacePaths();
+	if (wsPaths.length > 1) {
+		let cleaned = 0;
+		for (const ws of wsPaths.slice(1)) {
+			const mcpPath = getMcpConfigPath(ws);
+			const config = readJson<any>(mcpPath);
+			if (config?.mcpServers?.MultiSession) {
+				delete config.mcpServers.MultiSession;
+				writeJson(mcpPath, config);
+				cleaned++;
+			}
+			const rulePath = path.join(ws, '.cursor', 'rules', 'multisession.mdc');
+			try { fs.unlinkSync(rulePath); } catch { /* ignore */ }
+		}
+		if (cleaned > 0) {
+			output.appendLine(`[activate] deduplication: removed MultiSession MCP from ${cleaned} secondary workspace folder(s)`);
+		}
+	}
 
 	markThisWindowActive();
 
