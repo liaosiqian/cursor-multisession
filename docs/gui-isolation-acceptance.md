@@ -90,7 +90,58 @@ unit/e2e 只覆盖判定函数。归属泄漏最终要在「真实的扩展宿�
 - 建议：发布前用 `scripts/mcp-approval-key.mjs` 算出新审批键，装好后再到 Cursor 的 MCP 设置里
   确认该服务已启用。
 
-### 尚未验证的一环
+### 尚未验证的一环：真实 Agent 消费
 
-会话注册、派发消费与回复都必须由 agent 调用 `check_messages` 才会发生。这一步只能在真实
-Cursor 窗口里让 agent 跑一轮（需要解锁屏幕、用 UI 驱动），脚本无法替代；屏幕锁定期间到此为止。
+会话注册、派发消费与回复都必须由 agent 调用 `check_messages` 才会发生，因此隔离窗口里必须能跑起
+一个 Cursor Agent。当前隔离 profile **没有登录态**：主 profile 的
+`<ud>/User/globalStorage/state.vscdb` 里有 `cursorAuth/accessToken` 与
+`cursorAuth/refreshToken`，隔离目录里只有 `cursorAuth/stripeMembershipType`，
+窗口打开就是 “Cursor Settings” 并要求登录（页面提示 `Cursor's AI features require you to be logged in`）。
+
+可选路径（都需要用户决定）：把主 profile 的两行 `cursorAuth/*` 拷进隔离目录后重启窗口；在隔离
+窗口手动登录；或使用已登录的 `cursor-agent` CLI（需要 `agent login` 或 `CURSOR_API_KEY`）。
+登录态就位后即可用下面的 CDP 工具把这一环跑完，不受锁屏影响。
+
+## 无需解锁屏幕的驱动方式：CDP（2026-10-09 实测）
+
+锁屏时 CUA 不可用，但给隔离窗口加上调试端口后可以用 CDP 直接读界面状态、注入输入、截图，
+完全不依赖物理屏幕与键鼠：
+
+```bash
+Cursor --user-data-dir $ISO/ud-c --extensions-dir $ISO/ext-new \
+  --remote-debugging-port=9333 --remote-allow-origins=* $ISO/ws-agent
+```
+
+`scripts/cdp-eval.mjs` 是配套工具（自带最小 WebSocket 客户端，不新增依赖）：
+
+| 命令 | 用途 |
+|------|------|
+| `list` | 列出 page / iframe / service_worker 目标 |
+| `eval '<js>' [--frame]` | 执行 JS；`--frame` 把 `document/window` 换成面板内部文档 |
+| `ax [关键词]` | 读无障碍树（没有图像输入时用它「看」界面） |
+| `insert '<text>'` / `enter` | 往当前聚焦元素注入文本 / 回车 |
+| `shot <png>` | 截图留证 |
+
+要点与坑：
+
+- 面板是 VS Code Webview：CDP 里看到的是 host 页，真实 DOM 在 `#active-frame` 内联 iframe 里，
+  `--frame` 负责切换。`iframe:0` 是 MultiSession 面板，`iframe:1` 是微信面板。
+- CDP 帧必须等 WebSocket 握手完成后再发，否则会排到 HTTP 握手请求前面，被对端重置连接。
+- 重启隔离窗口前确认旧实例已退出：它占着调试端口时新实例的 devtools server 会启动失败
+  （日志 `bind() failed: Address already in use`），此时 `list` 只会显示旧窗口的目标。
+
+## 面板派发路径验收（2026-10-09，隔离窗口 C）
+
+窗口 C（`ud-c` + `ext-new` + 数据根 `data-agent`）里用 CDP 驱动真实面板，两种状态各跑一次，
+只看队列文件落点：
+
+| 面板状态 | 操作 | 旧构建 | 新构建 |
+|----------|------|--------|--------|
+| 没有选中会话 | 输入「无会话发送验证-N」并点发送 | 写进 `sessions/default/queue.json` | 不写任何队列，草稿留在输入框 |
+| 已绑定会话夹具 `s-panel-a` | 输入「会话派发验证-N」并点发送 | 落到该会话 `queue.json` | 同左 |
+
+- 根因：`src/webview/index.tsx` 用 `activeSessionId || 'default'` 兜底，绕过了扩展侧
+  「没有 sessionId 就拒绝」的守卫 —— 归到 `default` 的消息正是历史上会被迁移给无关对话的那批。
+  现在发送路径不再兜底，扩展侧同时把 `sid === 'default'` 也一并拒绝（纵深防御）。
+- 未被消费的消息会由扩展的送达检查标成面板上的「待处理」，符合预期。
+- 本轮验证不需要解锁屏幕，也不需要 Cursor 登录态。
