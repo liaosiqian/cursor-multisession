@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
-import { pruneRecordToAliveIds, pruneSetToAliveIds } from '../shared/session-visibility';
+import {
+	dropSessionKeys,
+	inquiryKey,
+	pruneRecordBySessionPrefix,
+	pruneRecordToAliveIds,
+	pruneSetToAliveIds,
+} from '../shared/session-visibility';
 
 declare const vscode: {
 	postMessage(msg: any): void;
@@ -232,6 +238,8 @@ function App() {
 	// 不清理的话这些 map 会一直保留已关闭会话的日志与摘要,面板内存只增不减。
 	const pruneSessionState = useCallback((aliveIds: Set<string>) => {
 		const keep = <T,>(prev: Record<string, T>) => pruneRecordToAliveIds(prev, aliveIds);
+		// 提问表单的键是「会话 id:问题序号」,不能按整键裁剪,否则每刷新一次会话列表就清空
+		const keepBySession = <T,>(prev: Record<string, T>) => pruneRecordBySessionPrefix(prev, aliveIds);
 		setLogsMap(keep);
 		setPendingMap(keep);
 		setSummaryMap(keep);
@@ -239,8 +247,8 @@ function App() {
 		setDraftsMap(keep);
 		setInquiryMap(keep);
 		setAgentStatusMap(keep);
-		setInquirySelections(keep);
-		setInquiryTexts(keep);
+		setInquirySelections(keepBySession);
+		setInquiryTexts(keepBySession);
 		setUndeliveredSessions(prev => pruneSetToAliveIds(prev, aliveIds));
 	}, []);
 
@@ -822,7 +830,7 @@ function App() {
 
 	const handleAnswerInquiry = useCallback((sid: string, inquiry: InquiryData) => {
 		const answers = inquiry.questions.map((q, qi) => {
-			const key = `${qi}`;
+			const key = inquiryKey(sid, qi);
 			return {
 				question: q.question,
 				selected: inquirySelections[key] || [],
@@ -831,8 +839,9 @@ function App() {
 		});
 		vscode.postMessage({ type: 'answerInquiry', sessionId: sid, answers });
 		setInquiryMap(prev => { const n = { ...prev }; delete n[sid]; return n; });
-		setInquirySelections({});
-		setInquiryTexts({});
+		// 只清本会话的条目:别的会话可能正开着表单,之前整表清空会连带丢掉它们的内容
+		setInquirySelections(prev => dropSessionKeys(prev, sid));
+		setInquiryTexts(prev => dropSessionKeys(prev, sid));
 	}, [inquirySelections, inquiryTexts]);
 
 	const toggleSelection = useCallback((qIdx: string, optId: string, multiple: boolean) => {
@@ -1224,7 +1233,7 @@ function App() {
 							<div className="inquiry-q-text">{q.question}</div>
 							<div className="inquiry-options">
 								{q.options.map(opt => {
-									const key = `${qi}`;
+									const key = inquiryKey(activeSessionId, qi);
 									const selected = (inquirySelections[key] || []).includes(opt.id);
 									return (
 										<button
@@ -1240,8 +1249,8 @@ function App() {
 							<input
 								className="inquiry-text-input"
 								placeholder="补充说明（可选）"
-								value={inquiryTexts[`${qi}`] || ''}
-								onChange={e => setInquiryTexts(prev => ({ ...prev, [`${qi}`]: e.target.value }))}
+								value={inquiryTexts[inquiryKey(activeSessionId, qi)] || ''}
+								onChange={e => setInquiryTexts(prev => ({ ...prev, [inquiryKey(activeSessionId, qi)]: e.target.value }))}
 							/>
 						</div>
 					))}

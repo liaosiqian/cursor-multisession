@@ -149,3 +149,46 @@ export function pruneSetToAliveIds(prev: Set<string>, aliveIds: Set<string>): Se
 	}
 	return changed ? next : prev;
 }
+
+/**
+ * AI 提问表单里「某个会话的第 N 个问题」的键。
+ *
+ * 必须带会话 id:早期只用问题序号(0/1/2),既会让多个会话共用同一份选择与补充说明,
+ * 又会被 pruneRecordToAliveIds 当成「已关闭会话的残留」在每次会话列表刷新时清空。
+ * 会话 id 形如 mpm9keyf-rlgefg,不含冒号,所以 ':' 可以安全地当分隔符。
+ */
+export function inquiryKey(sessionId: string, questionIndex: number | string): string {
+	return sessionId + ':' + questionIndex;
+}
+
+/**
+ * 按「键前缀是会话 id」裁剪的表(inquiryKey 产生的那些)。
+ * 与 pruneRecordToAliveIds 的区别:后者要求整键等于会话 id,用于日志/草稿这类以会话 id
+ * 直接作键的表;本函数保留「存活会话 id + 后缀」的条目。无变化时返回原对象。
+ */
+export function pruneRecordBySessionPrefix<T>(
+	prev: Record<string, T>,
+	aliveIds: Set<string>,
+): Record<string, T> {
+	const next: Record<string, T> = {};
+	let changed = false;
+	for (const [key, value] of Object.entries(prev)) {
+		const sep = key.indexOf(':');
+		const sid = sep >= 0 ? key.slice(0, sep) : key;
+		if (aliveIds.has(sid)) next[key] = value;
+		else changed = true;
+	}
+	return changed ? next : prev;
+}
+
+/** 删掉某个会话的全部键(提交回答后清本会话的选择与补充说明,不影响别的会话) */
+export function dropSessionKeys<T>(prev: Record<string, T>, sessionId: string): Record<string, T> {
+	const prefix = sessionId + ':';
+	let changed = false;
+	const next: Record<string, T> = {};
+	for (const [key, value] of Object.entries(prev)) {
+		if (key.startsWith(prefix)) changed = true;
+		else next[key] = value;
+	}
+	return changed ? next : prev;
+}

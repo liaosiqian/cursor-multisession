@@ -79,8 +79,11 @@ await build({
 	outfile,
 	logLevel: 'silent',
 });
-	const { selectVisibleSessions, needsOwnershipAdoption, normalizePathForCompare, pruneRecordToAliveIds, pruneSetToAliveIds } =
-		await import(pathToFileURL(outfile).href);
+	const {
+		selectVisibleSessions, needsOwnershipAdoption, normalizePathForCompare,
+		pruneRecordToAliveIds, pruneSetToAliveIds,
+		inquiryKey, pruneRecordBySessionPrefix, dropSessionKeys,
+	} = await import(pathToFileURL(outfile).href);
 fs.rmSync(outfile, { force: true });
 
 const visible = (s, ctx) => selectVisibleSessions([s], ctx).length === 1;
@@ -135,6 +138,23 @@ check(pruneRecordToAliveIds(unchanged, new Set(['a'])) === unchanged, '无需裁
 check(pruneSetToAliveIds(new Set(['a', 'b']), aliveIds).size === 1, 'Set 也按存活会话裁剪');
 const sameSet = new Set(['a']);
 check(pruneSetToAliveIds(sameSet, aliveIds) === sameSet, 'Set 无需裁剪时返回原对象');
+
+// 回归:补充说明/选项选择曾被每次会话列表刷新清空。
+// 根因是键只用问题序号,被按「整键等于会话 id」裁剪。
+console.log('[7] 提问表单的会话前缀键');
+check(inquiryKey('sess-1', 0) === 'sess-1:0', '键 = 会话 id + 问题序号');
+const formState = { 'sess-1:0': '补充说明', 'sess-1:1': 'x', 'sess-2:0': 'y' };
+const prunedForms = pruneRecordBySessionPrefix(formState, new Set(['sess-1']));
+check(JSON.stringify(prunedForms) === JSON.stringify({ 'sess-1:0': '补充说明', 'sess-1:1': 'x' }),
+	'会话列表刷新后本会话的输入仍在(不再被清空)');
+check(pruneRecordBySessionPrefix(formState, new Set(['sess-1', 'sess-2'])) === formState,
+	'无会话消失时返回原对象(避免无谓重渲染)');
+check(JSON.stringify(pruneRecordBySessionPrefix({ '0': 'legacy' }, new Set(['sess-1']))) === '{}',
+	'老的无前缀残留键会被清掉');
+check(JSON.stringify(dropSessionKeys(formState, 'sess-1')) === JSON.stringify({ 'sess-2:0': 'y' }),
+	'提交回答只清本会话的条目');
+const otherOnly = { 'sess-2:0': 'y' };
+check(dropSessionKeys(otherOnly, 'sess-1') === otherOnly, '本会话无条目时返回原对象');
 
 console.log('结果: ' + (checks - failures) + '/' + checks + ' 通过');
 if (failures > 0) {
