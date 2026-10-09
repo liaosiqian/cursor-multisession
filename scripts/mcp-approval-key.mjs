@@ -7,6 +7,7 @@
 // 自检: node scripts/mcp-approval-key.mjs --selftest
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 function numberHash(value, seed) {
 	return ((seed << 5) - seed + value) | 0;
@@ -82,4 +83,5 @@ function main() {
 	console.log(approvalKey(serverName, server, folderName, folderIndex));
 }
 
-main();
+// 作为模块被 import 时不执行 CLI(供 mcp-approve-version.mjs 复用 serverConfigHash)
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) main();
