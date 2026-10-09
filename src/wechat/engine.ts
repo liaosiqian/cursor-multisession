@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { DATA_ROOT } from '../shared/data-root';
 import { loadConfig, ILINK_BASE_URL } from './config/index';
 import { ClawBotClient } from './api/client';
 import { MessagePoller } from './poller/index';
@@ -47,9 +47,9 @@ export interface EngineEvents {
   boundSessionChanged: [sessionId: string | null];
 }
 
-const WECHAT_ACTION_DIR = path.join(os.homedir(), '.multisession', 'wechat-actions');
+const WECHAT_ACTION_DIR = path.join(DATA_ROOT, 'wechat-actions');
 
-const ENGINE_LOCK_DIR = path.join(os.homedir(), '.multisession');
+const ENGINE_LOCK_DIR = DATA_ROOT;
 const ENGINE_LOCK_FILE = path.join(ENGINE_LOCK_DIR, 'wechat-engine.lock');
 const LOCK_STALE_MS = 60_000;
 

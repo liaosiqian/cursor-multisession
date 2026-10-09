@@ -1,11 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { DATA_ROOT } from '../../shared/data-root';
 import { MessageItemType, type WeixinMessage, type MessageItem } from '../api/types';
 import { MediaService } from '../media/index';
 import { logger } from '../util/logger';
 
-const MULTISESSION_DIR = path.join(os.homedir(), ".multisession");
+const MULTISESSION_DIR = DATA_ROOT;
 
 export interface ExtractedContent {
   text: string;

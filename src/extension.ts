@@ -3,8 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { ChildProcess, spawn, execSync, execFile } from 'child_process';
+import { DATA_ROOT } from './shared/data-root';
 
-const DATA_ROOT = path.join(os.homedir(), '.multisession');
 const SESSIONS_FILE = path.join(DATA_ROOT, 'sessions.json');
 const SESSIONS_DIR = path.join(DATA_ROOT, 'sessions');
 const ACTIVE_WINDOW_FILE = path.join(DATA_ROOT, 'active-window.json');
@@ -26,6 +26,8 @@ let EXT_VERSION = '?';
 let IS_DEV = false;
 
 const MAX_RECENT_FILES = 30;
+// 面板每个会话只渲染日志尾部窗口
+const MAX_VISIBLE_LOGS = 50;
 const recentClosedFiles: { path: string; name: string; closedAt: number }[] = [];
 
 // ── Voice recording state ──
@@ -326,6 +328,43 @@ function readJson<T = any>(p: string): T | null {
 	catch { return null; }
 }
 
+// ── 变更感知的文件缓存 ──
+// tick() 每 500ms 遍历可见会话。chat-log.json 可达数 MB(实测单会话 4MB ≈17ms/次解析、
+// 每次约 5MB 临时对象),会话关闭后仍会被反复解析,把扩展宿主内存和 GC 压力顶高。
+// 这里用 mtime + size 判断文件是否变化:未变化直接复用上次结果,变化了才重新解析;
+// 派生结果只保留渲染需要的日志尾部窗口,避免整份日志常驻内存。
+const FILE_CACHE_LIMIT = 512;
+interface FileCacheEntry { mtimeMs: number; size: number; value: any; }
+const fileCache = new Map<string, FileCacheEntry>();
+
+function readFileIfChanged<T>(p: string, derive: (raw: any) => T | null): T | null {
+	let stat: fs.Stats;
+	try { stat = fs.statSync(p); } catch {
+		fileCache.delete(p);
+		return null;
+	}
+	const hit = fileCache.get(p);
+	if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
+		return hit.value as T;
+	}
+	const value = derive(readJson(p));
+	if (value === null) {
+		fileCache.delete(p);
+		return null;
+	}
+	if (fileCache.size >= FILE_CACHE_LIMIT) fileCache.clear();
+	fileCache.set(p, { mtimeMs: stat.mtimeMs, size: stat.size, value });
+	return value;
+}
+
+/** 丢弃不再可见会话的缓存,释放已关闭会话占用的内存。 */
+function evictFileCacheForRemovedSessions(activeIds: Set<string>) {
+	for (const key of [...fileCache.keys()]) {
+		const sid = path.basename(path.dirname(key));
+		if (!activeIds.has(sid)) fileCache.delete(key);
+	}
+}
+
 function writeJson(p: string, data: any) {
 	ensureDir(path.dirname(p));
 	fs.writeFileSync(p, JSON.stringify(data, null, '\t'), 'utf-8');
@@ -419,7 +458,7 @@ const ARCHIVE_AFTER_DAYS = 3;
 const ARCHIVE_THRESHOLD_MS = ARCHIVE_AFTER_DAYS * 24 * 60 * 60 * 1000;
 
 function getSessionsForThisWorkspace(): SessionMeta[] {
-	const sessions = readJson<SessionMeta[]>(SESSIONS_FILE) || [];
+	const sessions = readFileIfChanged<SessionMeta[]>(SESSIONS_FILE, (raw) => Array.isArray(raw) ? raw : null) || [];
 	const wsPaths = getWorkspacePaths().map(normalizePathForCompare);
 	const now = Date.now();
 	return sessions.filter(s => {
@@ -778,18 +817,23 @@ function tick() {
 				if (!activeIds.has(sid)) lastPushed.delete(key);
 			}
 		}
+		// 已关闭/已不可见的会话不再占用文件缓存
+		evictFileCacheForRemovedSessions(activeIds);
 
 		for (const s of sessions) {
 			const dir = path.join(SESSIONS_DIR, s.id);
 
-			const logs = readJson<any[]>(path.join(dir, 'chat-log.json'));
-			if (logs) {
-				const MAX_VISIBLE_LOGS = 50;
-				const trimmed = logs.length > MAX_VISIBLE_LOGS ? logs.slice(-MAX_VISIBLE_LOGS) : logs;
-				pushIfChanged(`s:${s.id}:logs`, { type: 'syncLogs', sessionId: s.id, data: trimmed, totalCount: logs.length });
+			const logWindow = readFileIfChanged<{ logs: any[]; totalCount: number }>(
+				path.join(dir, 'chat-log.json'),
+				(raw) => Array.isArray(raw)
+					? { logs: raw.length > MAX_VISIBLE_LOGS ? raw.slice(-MAX_VISIBLE_LOGS) : raw, totalCount: raw.length }
+					: null,
+			);
+			if (logWindow) {
+				pushIfChanged(`s:${s.id}:logs`, { type: 'syncLogs', sessionId: s.id, data: logWindow.logs, totalCount: logWindow.totalCount });
 			}
 
-			const queue = readJson<any[]>(path.join(dir, 'queue.json'));
+			const queue = readFileIfChanged<any[]>(path.join(dir, 'queue.json'), (raw) => Array.isArray(raw) ? raw : null);
 			pushIfChanged(`s:${s.id}:pending`, {
 				type: 'pendingCount',
 				sessionId: s.id,
@@ -797,22 +841,22 @@ function tick() {
 				items: queue || [],
 			});
 
-			const inquiry = readJson(path.join(dir, 'inquiry.json'));
+			const inquiry = readFileIfChanged(path.join(dir, 'inquiry.json'), (raw) => raw ?? null);
 			if (inquiry) {
 				pushIfChanged(`s:${s.id}:inquiry`, { type: 'inquiry', sessionId: s.id, data: inquiry });
 			}
 
-			const summary = readJson(path.join(dir, 'summary.json'));
+			const summary = readFileIfChanged(path.join(dir, 'summary.json'), (raw) => raw ?? null);
 			if (summary) {
 				pushIfChanged(`s:${s.id}:summary`, { type: 'summary', sessionId: s.id, data: summary });
 			}
 
-			const progress = readJson(path.join(dir, 'progress.json'));
+			const progress = readFileIfChanged(path.join(dir, 'progress.json'), (raw) => raw ?? null);
 			if (progress) {
 				pushIfChanged(`s:${s.id}:progress`, { type: 'progress', sessionId: s.id, data: progress });
 			}
 
-			const agentStatus = readJson(path.join(dir, 'status.json'));
+			const agentStatus = readFileIfChanged(path.join(dir, 'status.json'), (raw) => raw ?? null);
 			if (agentStatus) {
 				pushIfChanged(`s:${s.id}:status`, { type: 'agentStatus', sessionId: s.id, data: agentStatus });
 			}
@@ -869,11 +913,16 @@ function installMcpConfig(ctx: vscode.ExtensionContext): 'installed' | 'already'
 	if (wsPaths.length === 0) return 'none';
 
 	const targetWs = wsPaths[0];
-	const desiredMcpEntry = {
+	const desiredMcpEntry: any = {
 		command: 'node',
 		args: [mcpServerPath],
 		timeoutMs: 86400000,
 	};
+	// 隔离验证实例:把数据根覆盖写进 MCP 配置,保证 MCP 子进程与扩展宿主读同一份状态
+	const dataRootOverride = process.env.MULTISESSION_DATA_ROOT?.trim();
+	if (dataRootOverride) {
+		desiredMcpEntry.env = { MULTISESSION_DATA_ROOT: dataRootOverride };
+	}
 	const desiredRuleContent = getCursorRuleContent();
 
 	const mcpPath = getMcpConfigPath(targetWs);
@@ -883,7 +932,8 @@ function installMcpConfig(ctx: vscode.ExtensionContext): 'installed' | 'already'
 	const mcpMatch = existing
 		&& existing.command === desiredMcpEntry.command
 		&& JSON.stringify(existing.args) === JSON.stringify(desiredMcpEntry.args)
-		&& existing.timeoutMs === desiredMcpEntry.timeoutMs;
+		&& existing.timeoutMs === desiredMcpEntry.timeoutMs
+		&& JSON.stringify(existing.env ?? null) === JSON.stringify(desiredMcpEntry.env ?? null);
 
 	const rulePath = path.join(targetWs, '.cursor', 'rules', 'multisession.mdc');
 	let ruleMatch = false;
@@ -1598,7 +1648,7 @@ function isAccountActive(entry: AccountEntry): boolean {
 }
 
 function writeBindingFile(sessionId: string | null, source: string): void {
-	const bindingFile = path.join(os.homedir(), '.multisession', 'wechat-binding.json');
+	const bindingFile = path.join(DATA_ROOT, 'wechat-binding.json');
 	try {
 		const dir = path.dirname(bindingFile);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });

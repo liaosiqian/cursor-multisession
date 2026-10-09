@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { DATA_ROOT } from '../../shared/data-root';
 import { ClawBotClient } from '../api/client';
 import { loadContextToken, loadCredentials } from '../auth/store';
 import { listSessions, getSessionName } from '../bridge/multisession';
@@ -9,7 +10,7 @@ import type { SessionWatcherManager } from '../bridge/session-watcher-manager';
 import { logger } from '../util/logger';
 import type { EngineState } from '../engine';
 
-const SESSIONS_FILE = path.join(os.homedir(), ".multisession", "sessions.json");
+const SESSIONS_FILE = path.join(DATA_ROOT, "sessions.json");
 const RECENT_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
 function recentSessions() {

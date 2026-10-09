@@ -4,8 +4,8 @@ import { z } from 'zod';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { DATA_ROOT } from '../src/shared/data-root';
 
-const DATA_ROOT = path.join(os.homedir(), '.multisession');
 const SESSIONS_FILE = path.join(DATA_ROOT, 'sessions.json');
 const SESSIONS_DIR = path.join(DATA_ROOT, 'sessions');
 const ACTIVE_WINDOW_FILE = path.join(DATA_ROOT, 'active-window.json');
@@ -317,6 +317,192 @@ function migrateDefaultQueue(sid: string) {
 	log(`[migrate] moved ${defaultQueue.length} messages from default to ${sid}`);
 }
 
+// ── 接管派发协议:dispatch_id 幂等 + inflight 在飞记录 ──
+//
+// 外部编排器(Codex 等)无法直接调用本 MCP——stdio 通道由 Cursor 独占——只能按文件协议派发:
+//   1. 向 sessions/<sid>/queue.json 追加 {id, dispatch_id, content, timestamp, urgent?}
+//   2. 本进程在 check_messages 长轮询里消费该条,并写 inflight.json 标记"正在处理"
+//   3. 本轮结束(reply / 下一次 check_messages)时收尾,结果落在 summary.json、chat-log.json
+// dispatch_id 是派发方的幂等键:断连重发不会重复执行。
+// 会话被新 MCP 进程恢复、且 inflight 仍属于已退出的旧进程时,把未完成任务交还 Agent 续做。
+const DISPATCH_HISTORY_LIMIT = 200;
+const INFLIGHT_REPLAY_LIMIT = 2;
+
+interface QueueMessage {
+	id?: string;
+	content?: string;
+	text?: string;
+	timestamp?: number | string;
+	urgent?: boolean;
+	dispatch_id?: string;
+}
+
+interface InflightRecord {
+	id?: string;
+	dispatch_id?: string;
+	content: string;
+	consumed_at: number;
+	mcp_pid: number;
+	replay_count: number;
+	replayed_at?: number;
+	completed_at?: number;
+	completed_by?: string;
+}
+
+interface DispatchRecord {
+	message_id?: string;
+	consumed_at: number;
+	completed_at?: number;
+	completed_by?: string;
+}
+
+function messageText(message: QueueMessage | null | undefined): string {
+	if (!message) return '';
+	return message.content ?? message.text ?? '';
+}
+
+function isPidAlive(pid: number): boolean {
+	if (!pid || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error: any) {
+		// EPERM 表示进程存在但无权限发信号,视为存活
+		return error?.code === 'EPERM';
+	}
+}
+
+function dispatchHistoryPath(sid: string): string {
+	return path.join(getSessionDir(sid), 'dispatch-history.json');
+}
+
+function inflightPath(sid: string): string {
+	return path.join(getSessionDir(sid), 'inflight.json');
+}
+
+function readDispatchHistory(sid: string): Record<string, DispatchRecord> {
+	return readJson<Record<string, DispatchRecord>>(dispatchHistoryPath(sid)) || {};
+}
+
+function readInflight(sid: string): InflightRecord | null {
+	return readJson<InflightRecord>(inflightPath(sid));
+}
+
+function markDispatchCompleted(sid: string, dispatchId: string | undefined, completedBy: string) {
+	if (!dispatchId) return;
+	const history = readDispatchHistory(sid);
+	const record = history[dispatchId];
+	if (!record || record.completed_at) return;
+	history[dispatchId] = { ...record, completed_at: Date.now(), completed_by: completedBy };
+	writeJson(dispatchHistoryPath(sid), history);
+}
+
+/** 消费一条消息时记账:dispatch_id 只允许执行一次,同键重发会被 dedupeQueue 丢弃。 */
+function beginInflight(sid: string, message: QueueMessage) {
+	const previous = readInflight(sid);
+	if (previous && !previous.completed_at) {
+		// 旧任务还没收尾就被新消息顶掉:如实记录,避免派发方误判成"仍在处理"
+		markDispatchCompleted(sid, previous.dispatch_id, 'superseded');
+	}
+	writeJson(inflightPath(sid), {
+		id: message.id,
+		dispatch_id: message.dispatch_id,
+		content: messageText(message),
+		consumed_at: Date.now(),
+		mcp_pid: MCP_PID,
+		replay_count: previous && previous.dispatch_id === message.dispatch_id ? (previous.replay_count ?? 0) : 0,
+	});
+	if (message.dispatch_id) {
+		const history = readDispatchHistory(sid);
+		history[message.dispatch_id] = { message_id: message.id, consumed_at: Date.now() };
+		const trimmed = Object.entries(history)
+			.sort((a, b) => (b[1].consumed_at ?? 0) - (a[1].consumed_at ?? 0))
+			.slice(0, DISPATCH_HISTORY_LIMIT);
+		writeJson(dispatchHistoryPath(sid), Object.fromEntries(trimmed));
+	}
+}
+
+/** 本轮结束:标记在飞任务已完成(文件保留,供派发方核对完成方式与时间)。 */
+function finishInflight(sid: string, completedBy: string) {
+	const current = readInflight(sid);
+	if (!current || current.completed_at) return;
+	writeJson(inflightPath(sid), { ...current, completed_at: Date.now(), completed_by: completedBy });
+	markDispatchCompleted(sid, current.dispatch_id, completedBy);
+	log(`[inflight] ${sid} dispatch ${current.dispatch_id ?? current.id} completed by ${completedBy}`);
+}
+
+/**
+ * 在飞任务的归属判定,与"是否带 session_id 恢复"无关,只看原持有进程是否还活着:
+ * - 原进程仍存活(或就是本进程):本次调用说明那一轮已经结束,收尾,不重复执行
+ * - 原进程已退出:任务被中断,把任务原文交还给 Agent 续做(最多 INFLIGHT_REPLAY_LIMIT 次)
+ * 返回值非空表示"需要把未完成任务投递给 Agent"。
+ */
+function takeOverInflight(sid: string, hadReply: boolean): string | null {
+	const inflight = readInflight(sid);
+	if (!inflight || inflight.completed_at) return null;
+	const ownerAlive = inflight.mcp_pid === MCP_PID || isPidAlive(inflight.mcp_pid);
+	if (ownerAlive) {
+		finishInflight(sid, hadReply ? 'reply' : 'next-call');
+		return null;
+	}
+	if ((inflight.replay_count ?? 0) >= INFLIGHT_REPLAY_LIMIT) {
+		finishInflight(sid, 'replay-exhausted');
+		return null;
+	}
+	const replayCount = (inflight.replay_count ?? 0) + 1;
+	writeJson(inflightPath(sid), { ...inflight, mcp_pid: MCP_PID, replay_count: replayCount, replayed_at: Date.now() });
+	log(`[inflight] ${sid} took over unfinished dispatch ${inflight.dispatch_id ?? inflight.id} (attempt ${replayCount})`);
+	return `⚠️ 上一轮任务在处理中被中断（原 MCP 进程已退出），这是第 ${replayCount} 次续做请求。请基于当前工作区继续完成，并如实汇报进度、未完成项与结论：\n\n--- 未完成任务 ---\n${inflight.content}\n--- 任务原文结束 ---`;
+}
+
+/** 消费前清理重复投递:同 dispatch_id 的历史条目直接丢弃,保证幂等。 */
+function dedupeQueue(sid: string, queue: QueueMessage[]): { queue: QueueMessage[]; dropped: number } {
+	const history = readDispatchHistory(sid);
+	const seen = new Set<string>();
+	const kept: QueueMessage[] = [];
+	let dropped = 0;
+	for (const item of queue) {
+		const dispatchId = item?.dispatch_id;
+		if (!dispatchId) { kept.push(item); continue; }
+		if (history[dispatchId] || seen.has(dispatchId)) { dropped++; continue; }
+		seen.add(dispatchId);
+		kept.push(item);
+	}
+	return { queue: dropped > 0 ? kept : queue, dropped };
+}
+
+/**
+ * 写 status.json:对外暴露可判活的进度信号。
+ * last_heartbeat_at 由长轮询每 10s 续期,派发方据此区分"在干活"与"进程已断";
+ * awaiting_reply + message_id/dispatch_id 用于把状态对回自己派发的任务。
+ */
+function writeAgentStatus(sid: string, fallbackStatus: 'idle' | 'processing', preview?: string) {
+	const statusPath = path.join(getSessionDir(sid), 'status.json');
+	const existing = readJson<any>(statusPath) || {};
+	const inflight = readInflight(sid);
+	const awaiting = !!inflight && !inflight.completed_at;
+	const status = awaiting ? 'processing' : fallbackStatus;
+	const now = Date.now();
+	const payload: any = {
+		...existing,
+		status,
+		since: existing.status === status ? (existing.since ?? now) : now,
+		last_heartbeat_at: now,
+		awaiting_reply: awaiting,
+	};
+	if (preview !== undefined) payload.preview = preview;
+	if (awaiting && inflight) {
+		payload.message_id = inflight.id;
+		payload.dispatch_id = inflight.dispatch_id;
+		payload.consumed_at = inflight.consumed_at;
+	} else {
+		delete payload.message_id;
+		delete payload.dispatch_id;
+		delete payload.consumed_at;
+	}
+	writeJson(statusPath, payload);
+}
+
 // ── MCP server ──
 
 const ENFORCE_SUFFIX = (sid: string) =>
@@ -425,11 +611,27 @@ server.tool(
 			log(`[reply] ${sid} summary written`);
 		}
 
-		// mark agent as idle (waiting for next message)
-		const statusPath = path.join(getSessionDir(sid), 'status.json');
-		writeJson(statusPath, { status: 'idle', since: Date.now() });
+		// 未完成任务收尾/续做判定(见 takeOverInflight 注释)
+		const replayText = takeOverInflight(sid, !!reply);
 
 		const queuePath = path.join(getSessionDir(sid), 'queue.json');
+		const pendingNow = readJson<QueueMessage[]>(queuePath) || [];
+
+		// 对外可见的存活/进度信号(awaiting_reply + last_heartbeat_at)
+		writeAgentStatus(sid, 'idle');
+
+		// 断连恢复:队列为空时立刻把未完成任务交还给 Agent,而不是让它干等新消息。
+		// 队列里已有新消息时不抢跑,新指令优先;未完成任务留到队列空时再续做。
+		if (replayText && pendingNow.length === 0) {
+			touchSession(sid);
+			log(`[inflight] ${sid} unfinished task handed back to agent`);
+			return {
+				content: [{
+					type: 'text' as const,
+					text: `[session_id: ${sid}]\n\n${replayText}${ENFORCE_SUFFIX(sid)}`,
+				}],
+			};
+		}
 
 		// 优先回放上次 ask_question 失车的 answers(如果存在)。处理顺序放在
 		// "recovered 短路返回" 之前,避免刚恢复的会话错过失车答案。
@@ -465,12 +667,18 @@ server.tool(
 		let nextHeartbeat = Date.now() + HEARTBEAT_INTERVAL_MS;
 
 		while (Date.now() < deadline) {
-			// check queue
-			const queue = readJson<any[]>(queuePath);
-			if (queue && queue.length > 0) {
-				const urgentIdx = queue.findIndex((m: any) => m.urgent);
-				let picked: any;
-				let remaining: any[];
+			// check queue:先按 dispatch_id 去重,断连重发不会重复执行
+			const rawQueue = readJson<QueueMessage[]>(queuePath);
+			const deduped = rawQueue && rawQueue.length > 0 ? dedupeQueue(sid, rawQueue) : null;
+			if (deduped && deduped.dropped > 0) {
+				writeJson(queuePath, deduped.queue);
+				log(`[dispatch] ${sid} dropped ${deduped.dropped} duplicated dispatch message(s)`);
+			}
+			const queue = deduped ? deduped.queue : [];
+			if (queue.length > 0) {
+				const urgentIdx = queue.findIndex((m: QueueMessage) => m.urgent);
+				let picked: QueueMessage;
+				let remaining: QueueMessage[];
 
 				if (urgentIdx >= 0) {
 					picked = queue[urgentIdx];
@@ -481,20 +689,21 @@ server.tool(
 				}
 
 				writeJson(queuePath, remaining);
+				// 在飞记账:派发方据此判断"已送达/处理中",并保证同 dispatch_id 只执行一次
+				beginInflight(sid, picked);
+
+				const text = messageText(picked);
 
 				// mark agent as processing
-				const statusPath2 = path.join(getSessionDir(sid), 'status.json');
-				writeJson(statusPath2, { status: 'processing', since: Date.now(), preview: (picked.content || picked.text || '').slice(0, 60) });
+				writeAgentStatus(sid, 'processing', text.slice(0, 60));
 
 				const logPath = path.join(getSessionDir(sid), 'chat-log.json');
 				const logs = readJson<any[]>(logPath) || [];
-				logs.push({ role: 'user', text: picked.content || picked.text, ts: picked.timestamp || Date.now() });
+				logs.push({ role: 'user', text, ts: picked.timestamp || Date.now() });
 				writeJson(logPath, logs);
 
 				touchSession(sid);
-				log(`[poll] ${sid} consumed 1 message (${remaining.length} remaining)`);
-
-				const text = picked.content || picked.text;
+				log(`[poll] ${sid} consumed 1 message (${remaining.length} remaining, dispatch=${picked.dispatch_id ?? '-'})`);
 				const pendingNote = remaining.length > 0
 					? `\n（队列中还有 ${remaining.length} 条待处理消息，处理完本条后会继续投递）`
 					: '';
@@ -550,6 +759,7 @@ server.tool(
 			if (Date.now() >= nextHeartbeat) {
 				touchSession(sid);
 				touchMcpClaim();
+				writeAgentStatus(sid, 'idle');
 				const progressToken = extra._meta?.progressToken;
 				if (progressToken !== undefined) {
 					try {

@@ -6,7 +6,8 @@
 set -uo pipefail
 
 ALLOW='{"permission":"allow"}'
-DATA_ROOT="$HOME/.multisession"
+# 数据根:默认 ~/.multisession,可用 MULTISESSION_DATA_ROOT 覆盖(隔离开发/验证实例)
+DATA_ROOT="${MULTISESSION_DATA_ROOT:-$HOME/.multisession}"
 SESSIONS_DIR="$DATA_ROOT/sessions"
 SESSIONS_META="$DATA_ROOT/sessions.json"
 CONV_MAP="$DATA_ROOT/conv-session-map.json"

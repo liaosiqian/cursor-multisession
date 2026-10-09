@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { DATA_ROOT } from '../../shared/data-root';
 import { logger } from '../util/logger';
 
-const MULTISESSION_DIR = path.join(os.homedir(), ".multisession");
+const MULTISESSION_DIR = DATA_ROOT;
 const SESSIONS_FILE = path.join(MULTISESSION_DIR, "sessions.json");
 
 export interface SessionEntry {
