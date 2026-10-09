@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { DATA_ROOT } from '../src/shared/data-root';
+import { resolveWindowPid } from '../src/shared/window-identity';
 
 const SESSIONS_FILE = path.join(DATA_ROOT, 'sessions.json');
 const SESSIONS_DIR = path.join(DATA_ROOT, 'sessions');
@@ -84,6 +85,10 @@ interface SessionMeta {
 	name: string;
 	workspace: string;
 	windowToken?: string;
+	/** 创建会话时 MCP 所属窗口的主进程 pid */
+	windowPid?: number;
+	/** 创建会话时绑定窗口的扩展宿主 pid:窗口级唯一身份,面板据此判定归属 */
+	windowOwnerPid?: number;
 	alive: boolean;
 	createdAt: number;
 	lastActiveAt: number;
@@ -119,14 +124,25 @@ interface ActiveWindowEntry {
 	token: string;
 	timestamp: number;
 	pid: number;
+	// 该窗口的 Cursor 主进程 pid(旧版本写入的条目没有这个字段)
+	windowPid?: number;
 }
 
 interface McpClaim {
 	mcpPid: number;
 	windowToken: string;
+	// token 所属窗口的扩展宿主 pid / 主进程 pid,用于会话归属
+	ownerPid?: number;
+	windowPid?: number;
 	workspace: string;
 	claimedAt: number;
 	lastSeenAt: number;
+}
+
+interface WindowClaim {
+	token: string;
+	ownerPid?: number;
+	windowPid: number | null;
 }
 
 function readActiveWindows(workspace: string): ActiveWindowEntry[] {
@@ -154,9 +170,11 @@ function pruneMcpClaims(claims: McpClaim[]): McpClaim[] {
 // 选出 MCP 所属的 Cursor 窗口 token,first-call 时 claim,后续一直沿用。
 // 关键原则:
 // 1. 同一 MCP 进程 (mcpPid) 只会 claim 一次,写入 mcp-claims.json。
-// 2. 跨多个 Cursor 窗口并存时,优先 claim 当前 workspace 里"未被其它活着的 MCP claim"的 token。
+// 2. 优先 claim "本窗口自己的" token:多个 Cursor 窗口的文件夹经常重叠,只按
+//    "最新未被占用"挑,会把本窗口 MCP 绑到别的窗口,本窗口创建的会话就被记到
+//    别的窗口名下(面板互相可见、消息投递到错误面板的根因)。
 // 3. 每次调用都续期 lastSeenAt,extension 可用此判断 MCP 存活性。
-function claimWindowToken(workspace: string): string | null {
+function claimWindow(workspace: string): WindowClaim | null {
 	let claims = pruneMcpClaims(readMcpClaims());
 
 	// 已经 claim 过,直接续期并返回
@@ -164,8 +182,16 @@ function claimWindowToken(workspace: string): string | null {
 	if (mine) {
 		mine.lastSeenAt = Date.now();
 		mine.workspace = workspace;
+		// 老版本写入的 claim 没有 ownerPid,用当前活跃条目补齐
+		if (mine.ownerPid === undefined) {
+			const entry = readActiveWindows(workspace).find(w => w.token === mine.windowToken);
+			if (entry) {
+				mine.ownerPid = entry.pid;
+				mine.windowPid = entry.windowPid;
+			}
+		}
 		writeMcpClaims(claims);
-		return mine.windowToken;
+		return { token: mine.windowToken, ownerPid: mine.ownerPid, windowPid: mine.windowPid ?? null };
 	}
 
 	const windows = readActiveWindows(workspace);
@@ -178,21 +204,27 @@ function claimWindowToken(workspace: string): string | null {
 	// 按时间戳从新到旧排序,倾向 claim 最新激活的窗口
 	windows.sort((a, b) => b.timestamp - a.timestamp);
 	const free = windows.find(w => !usedTokens.has(w.token));
-	const picked = free || windows[0]; // 最坏情况下所有 token 都被 claim,兜底取最新
-	if (!free) {
+	const myWindowPid = resolveWindowPid();
+	const ownWindow = myWindowPid
+		? windows.find(w => w.windowPid === myWindowPid && !usedTokens.has(w.token))
+		: undefined;
+	const picked = ownWindow || free || windows[0]; // 最坏情况下所有 token 都被 claim,兜底取最新
+	if (!ownWindow && !free) {
 		log(`[claim] WARN: all windows already claimed (pids=${[...usedTokens].join(',')}), falling back to newest token=${picked.token}`);
 	}
 
 	claims.push({
 		mcpPid: MCP_PID,
 		windowToken: picked.token,
+		ownerPid: picked.pid,
+		windowPid: picked.windowPid ?? myWindowPid ?? undefined,
 		workspace,
 		claimedAt: Date.now(),
 		lastSeenAt: Date.now(),
 	});
 	writeMcpClaims(claims);
-	log(`[claim] mcp_pid=${MCP_PID} workspace=${workspace} → windowToken=${picked.token} (ext_pid=${picked.pid})`);
-	return picked.token;
+	log(`[claim] mcp_pid=${MCP_PID} workspace=${workspace} → windowToken=${picked.token} (ext_pid=${picked.pid}, own_window=${!!ownWindow}, my_window_pid=${myWindowPid ?? '?'})`);
+	return { token: picked.token, ownerPid: picked.pid, windowPid: picked.windowPid ?? myWindowPid ?? null };
 }
 
 function touchMcpClaim() {
@@ -301,6 +333,23 @@ function hasLiveOwner(session: SessionMeta): boolean {
 	return false;
 }
 
+/**
+ * 把本窗口身份写进会话元数据。收编旧会话(原窗口已死/从未记录)时尤其重要:
+ * 面板靠 windowOwnerPid 判断「这个会话属于哪个窗口」,缺了它会同时出现在多个窗口。
+ */
+function stampWindowOwnership(sid: string, claim: WindowClaim | null) {
+	if (!claim) return;
+	const sessions = readSessions();
+	const target = sessions.find(s => s.id === sid);
+	if (!target) return;
+	if (target.windowOwnerPid === claim.ownerPid && target.windowToken === claim.token) return;
+	target.windowOwnerPid = claim.ownerPid;
+	target.windowToken = claim.token;
+	if (claim.windowPid) target.windowPid = claim.windowPid;
+	writeSessions(sessions);
+	log(`[ownership] session ${sid} → windowOwnerPid=${claim.ownerPid ?? '?'} windowPid=${claim.windowPid ?? '?'}`);
+}
+
 // ── session cleanup ──
 
 function cleanupExpiredSessions() {
@@ -352,17 +401,26 @@ function tryConsumeReconnectPending(workspace: string): string | null {
 
 // ── default queue migration ──
 
-function migrateDefaultQueue(sid: string) {
+/**
+ * default 队列里的消息没有会话归属。老版本会把它们「迁移」给下一个注册的会话,
+ * 多对话共存时这就是消息投递到无关对话的通道。现在只登记不投递,由用户/编排器显式重发。
+ */
+function reportUnownedDefaultQueue(sid: string) {
 	const defaultQueuePath = path.join(SESSIONS_DIR, 'default', 'queue.json');
-	const defaultQueue = readJson<any[]>(defaultQueuePath);
-	if (!defaultQueue || defaultQueue.length === 0) return;
+	const pending = readJson<QueueMessage[]>(defaultQueuePath);
+	if (!pending || pending.length === 0) return;
 
-	const sessionQueuePath = path.join(getSessionDir(sid), 'queue.json');
-	const sessionQueue = readJson<any[]>(sessionQueuePath) || [];
-	sessionQueue.push(...defaultQueue);
-	writeJson(sessionQueuePath, sessionQueue);
-	writeJson(defaultQueuePath, []);
-	log(`[migrate] moved ${defaultQueue.length} messages from default to ${sid}`);
+	const markerPath = path.join(SESSIONS_DIR, 'default', 'unrouted.json');
+	writeJson(markerPath, {
+		count: pending.length,
+		updatedAt: Date.now(),
+		items: pending.slice(-20).map(m => ({
+			id: m.id,
+			timestamp: m.timestamp,
+			preview: messageText(m).slice(0, 120),
+		})),
+	});
+	log(`[default] ${pending.length} unowned message(s) NOT delivered to ${sid} (missing session attribution); see ${markerPath}`);
 }
 
 // ── 接管派发协议:dispatch_id 幂等 + inflight 在飞记录 ──
@@ -600,7 +658,8 @@ server.tool(
 		const cwd = process.cwd();
 		// 绑定 MCP 进程到一个稳定的 Cursor 窗口。first-call 时 claim,后续一直沿用同一 token,
 		// 杜绝多 Cursor 窗口同工作区时读到"最新窗口" token 导致的互串。
-		const windowToken = claimWindowToken(cwd);
+		const windowClaim = claimWindow(cwd);
+		const windowToken = windowClaim?.token ?? null;
 		let sid = args.session_id as string | undefined;
 		const reply = args.reply as string | undefined;
 
@@ -628,6 +687,8 @@ server.tool(
 					name: `${wsName} #${num}`,
 					workspace: cwd,
 					windowToken: windowToken || undefined,
+					windowPid: windowClaim?.windowPid ?? undefined,
+					windowOwnerPid: windowClaim?.ownerPid,
 					alive: true,
 					createdAt: Date.now(),
 					lastActiveAt: Date.now(),
@@ -637,7 +698,7 @@ server.tool(
 				ensureDir(getSessionDir(sid));
 				log(`[register] new session ${sid} for ${cwd} windowToken=${windowToken}`);
 			}
-			migrateDefaultQueue(sid);
+			reportUnownedDefaultQueue(sid);
 			cleanupExpiredSessions();
 		}
 
@@ -645,6 +706,7 @@ server.tool(
 		// tryAdoptOrphan 将同一 session 分配给不同的 Compose 面板。
 		activelyPolledSessions.add(sid);
 		servedSessions.add(sid);
+		stampWindowOwnership(sid, windowClaim);
 		log(`[poll-lock] ${sid} locked (active=${activelyPolledSessions.size})`);
 
 		try {

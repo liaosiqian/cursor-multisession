@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
+import { pruneRecordToAliveIds, pruneSetToAliveIds } from '../shared/session-visibility';
 
 declare const vscode: {
 	postMessage(msg: any): void;
@@ -99,6 +100,9 @@ function App() {
 	const [agentStatusMap, setAgentStatusMap] = useState<Record<string, { status: string; since: number; preview?: string }>>({});
 	const [totalCountMap, setTotalCountMap] = useState<Record<string, number>>({});
 	const loadingMoreRef = useRef(false);
+	// 消息 handler 只注册一次,读不到最新的 activeSessionId,这里用 ref 同步一份
+	const activeSessionRef = useRef(activeSessionId);
+	useEffect(() => { activeSessionRef.current = activeSessionId; }, [activeSessionId]);
 	const [isRecording, setIsRecording] = useState(false);
 	const [isTranscribing, setIsTranscribing] = useState(false);
 	const [recordingDuration, setRecordingDuration] = useState(0);
@@ -224,19 +228,41 @@ function App() {
 	}, [sessions, activeSessionId]);
 
 	// message handler
+	// 会话从列表消失(对话关闭/归档/归属别的窗口)后清掉它的本地状态。
+	// 不清理的话这些 map 会一直保留已关闭会话的日志与摘要,面板内存只增不减。
+	const pruneSessionState = useCallback((aliveIds: Set<string>) => {
+		const keep = <T,>(prev: Record<string, T>) => pruneRecordToAliveIds(prev, aliveIds);
+		setLogsMap(keep);
+		setPendingMap(keep);
+		setSummaryMap(keep);
+		setTotalCountMap(keep);
+		setDraftsMap(keep);
+		setInquiryMap(keep);
+		setAgentStatusMap(keep);
+		setInquirySelections(keep);
+		setInquiryTexts(keep);
+		setUndeliveredSessions(prev => pruneSetToAliveIds(prev, aliveIds));
+	}, []);
+
 	useEffect(() => {
 		const handler = (e: MessageEvent) => {
 			const msg = e.data;
 			switch (msg.type) {
-				case 'sessions':
+				case 'sessions': {
+					const next: SessionMeta[] = msg.data || [];
+					const aliveIds = new Set<string>(next.map(s => s.id));
+					pruneSessionState(aliveIds);
+					if (activeSessionRef.current && !aliveIds.has(activeSessionRef.current)) {
+						setActiveSessionId(next[0]?.id ?? '');
+					}
 					setSessions(prev => {
-						const next = msg.data || [];
 						if (prev.length === next.length && prev.every((s: SessionMeta, i: number) =>
 							s.id === next[i].id && s.name === next[i].name && s.alive === next[i].alive && s.lastActiveAt === next[i].lastActiveAt
 						)) return prev;
 						return next;
 					});
 					break;
+				}
 				case 'syncLogs': {
 				const newLogs: ChatMessage[] = msg.data || [];
 				if (msg.totalCount !== undefined) {
@@ -473,7 +499,7 @@ function App() {
 		window.addEventListener('message', handler);
 		vscode.postMessage({ type: 'init' });
 		return () => window.removeEventListener('message', handler);
-	}, []);
+	}, [pruneSessionState]);
 
 	const extractEditorContent = useCallback(() => {
 		const editor = editorRef.current;

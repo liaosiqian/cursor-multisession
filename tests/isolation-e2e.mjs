@@ -64,12 +64,12 @@ async function waitFor(predicate, label, timeoutMs = 8000, intervalMs = 80) {
 }
 
 /** 启动一个 MCP 进程。cwd 即该进程认作的工作区(与 Cursor 行为一致) */
-async function startServer(root, cwd, name) {
+async function startServer(root, cwd, name, extraEnv = {}) {
 	const transport = new StdioClientTransport({
 		command: process.execPath,
 		args: [SERVER_PATH],
 		cwd,
-		env: { ...process.env, MULTISESSION_DATA_ROOT: root },
+		env: { ...process.env, MULTISESSION_DATA_ROOT: root, ...extraEnv },
 	});
 	const client = new Client({ name, version: '1.0.0' }, { capabilities: {} });
 	await client.connect(transport);
@@ -137,6 +137,11 @@ async function main() {
 	const servers = [];
 	const start = async (cwd, name) => {
 		const server = await startServer(root, cwd, name);
+		servers.push(server);
+		return server;
+	};
+	const startAsWindow = async (cwd, name, windowPid) => {
+		const server = await startServer(root, cwd, name, { MULTISESSION_WINDOW_PID: String(windowPid) });
 		servers.push(server);
 		return server;
 	};
@@ -230,6 +235,59 @@ async function main() {
 		check(metaWs2.workspace === ws2, '新工作空间新建独立会话,未认领 ws1 的会话');
 		const metaWs1 = readSessions(root).find((s) => s.id === sid1);
 		check(metaWs1?.workspace === ws1, 'ws1 会话保持原工作区归属');
+
+		console.log('[F] MCP 认自己窗口的 token(文件夹重叠也不串)');
+		// 两个窗口都打开了 ws1,另一个窗口的 token 更新;旧逻辑取"最新未被占用"的 token,
+		// 会把本窗口 MCP 绑到别的窗口,本窗口创建的会话就被记到别的窗口名下。
+		const mineToken = 'w-mine-window';
+		const otherToken = 'w-other-window';
+		const mineExtPid = 90001;
+		const otherExtPid = 90002;
+		for (const server of servers) await stopServer(server);
+		servers.length = 0;
+		await sleep(200);
+		writeJson(path.join(root, 'mcp-claims.json'), []);
+		const nowTs = Date.now();
+		writeJson(path.join(root, 'active-window.json'), {
+			[ws1]: [
+				{ token: mineToken, timestamp: nowTs - 5000, pid: mineExtPid, windowPid: 700001 },
+				{ token: otherToken, timestamp: nowTs, pid: otherExtPid, windowPid: 700002 },
+			],
+		});
+		const p5 = await startAsWindow(ws1, 'iso-p5', 700001);
+		startPoll(p5, {});
+		const mineSession = await waitFor(
+			() => readSessions(root).find(s => s.windowToken === mineToken || s.windowToken === otherToken),
+			'新窗口应注册会话',
+		);
+		check(mineSession.windowToken === mineToken, 'MCP 绑定了自己窗口的 token(' + mineSession.windowToken + ')');
+		check(mineSession.windowOwnerPid === mineExtPid, '会话记录了所属窗口扩展宿主 pid(' + mineSession.windowOwnerPid + ')');
+		check(mineSession.windowPid === 700001, '会话记录了所属窗口主进程 pid(' + mineSession.windowPid + ')');
+		const claims = readJson(path.join(root, 'mcp-claims.json')) ?? [];
+		check(claims.some(c => c.windowToken === mineToken), 'claim 落在自己窗口的 token 上');
+
+		console.log('[G] 无归属消息不再自动投递给任意会话');
+		writeJson(path.join(root, 'sessions', 'default', 'queue.json'), [
+			{ id: 'msg-unrouted', type: 'text', content: '无归属消息:不该被投递给任何会话', timestamp: new Date().toISOString() },
+		]);
+		for (const server of servers) await stopServer(server);
+		servers.length = 0;
+		await sleep(200);
+		writeJson(path.join(root, 'mcp-claims.json'), []);
+		seedWindows(root, { [ws1]: ['w-fresh'] });
+		const p6 = await start(ws1, 'iso-p6');
+		startPoll(p6, {});
+		const sessionsG = await waitFor(
+			() => { const all = readSessions(root); return all.some(s => s.windowToken === 'w-fresh') ? all : null; },
+			'新会话注册',
+		);
+		const fresh = sessionsG.find(s => s.windowToken === 'w-fresh');
+		const freshQueue = readJson(path.join(sessionDir(root, fresh.id), 'queue.json')) ?? [];
+		check(!freshQueue.some(m => m.id === 'msg-unrouted'), '无归属消息没有被投递给新会话');
+		const defaultQueue = readJson(path.join(root, 'sessions', 'default', 'queue.json')) ?? [];
+		check(defaultQueue.some(m => m.id === 'msg-unrouted'), '无归属消息仍在 default 队列(未丢失)');
+		const unrouted = readJson(path.join(root, 'sessions', 'default', 'unrouted.json'));
+		check(unrouted?.count >= 1, '写了未投递登记(unrouted.json)');
 
 		console.log('[E] 数据根隔离');
 		// 在用数据根由正在运行的 Cursor 实例持续写入,mtime 不足以判定;比对内容里是否出现测试会话

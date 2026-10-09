@@ -82,6 +82,33 @@ MultiSession 的 MCP 是 stdio 通道,由 Cursor 独占,外部进程无法直接
 
 派发侧不受影响:`dispatch --session <id>` 显式指定目标会话,不走收编逻辑。
 
+### 窗口身份与归属
+
+`active-window.json` 的每个条目除了 `token`(扩展宿主每次激活生成)还带 `windowPid`
+—— 本窗口 Cursor 主进程 pid。扩展宿主与 MCP 子进程各自向上回溯进程树都能算出同一个值,
+因此两边对「谁属于这个窗口」的判断一致(`src/shared/window-identity.ts`)。
+
+会话元数据记录三级归属信号:
+
+| 字段 | 写入方 | 含义 |
+|------|--------|------|
+| `windowOwnerPid` | MCP 认领窗口时 | 该窗口扩展宿主 pid(窗口级唯一身份) |
+| `windowToken` | MCP / 扩展认领时 | 该窗口当前 token |
+| `windowPid` | MCP | 创建会话时的窗口主进程 pid |
+
+由此产生三条规则:
+
+1. **MCP 认自己窗口的 token**。以前取「最新未被占用」的 token,多窗口文件夹重叠时会绑到
+   别的窗口,本窗口创建的会话被记到别的窗口名下。现在优先匹配自己的 `windowPid`。
+2. **面板只显示归属本窗口的会话**。另一个还活着的窗口持有的会话,即使工作区文件夹重叠也
+   不显示;持有者已退出/归属缺失的会话仍可见,并在展示时由本窗口认领归属
+   (`src/shared/session-visibility.ts`,单测 `tests/visibility-unit.mjs`)。
+3. **无归属消息不再自动投递**。`sessions/default/queue.json` 里的消息以前会被「迁移」给下一个
+   注册的会话,这是消息串到无关对话的通道;现在只登记到 `sessions/default/unrouted.json`,
+   由用户或编排器显式重发。面板没绑定会话时直接拒绝发送并提示。
+
+面板本地状态(日志/队列/摘要/草稿)会随会话列表裁剪,关闭的会话不再滞留内存。
+
 ## 工具
 
 ```bash
@@ -105,4 +132,12 @@ npm run test:e2e
 `tests/takeover-e2e.mjs` 覆盖派发→消费→在飞记账→幂等去重→断连续做→收尾;
 `tests/dispatch-cli-e2e.mjs` 覆盖 CLI 派发、送达/回复判定与账本幂等。
 `tests/isolation-e2e.mjs` 覆盖会话归属(干活中的会话不被抢 / 心跳新鲜不可抢 / 真失活仍可回收 / 跨工作区不认领)。
-三者都使用临时数据根,不动在用的 `~/.multisession`。
+`tests/visibility-unit.mjs` 覆盖面板可见性判定(跨窗口归属 / 工作区范围 / 归档 / 归属认领 / 状态裁剪)。
+以上都使用临时数据根,不动在用的 `~/.multisession`。
+
+内存测量:
+
+```bash
+npm run bench:tick               # tick 读盘解析量(真实数据根,只读)
+npm run bench:memory             # 「已关闭会话占内存」对照:旧/新实现在独立进程各跑一遍
+```

@@ -4,6 +4,13 @@ import * as path from 'path';
 import * as os from 'os';
 import { ChildProcess, spawn, execSync, execFile } from 'child_process';
 import { DATA_ROOT } from './shared/data-root';
+import { resolveWindowPid } from './shared/window-identity';
+import {
+	selectVisibleSessions,
+	needsOwnershipAdoption,
+	normalizePathForCompare,
+	type VisibilityContext,
+} from './shared/session-visibility';
 
 const SESSIONS_FILE = path.join(DATA_ROOT, 'sessions.json');
 const SESSIONS_DIR = path.join(DATA_ROOT, 'sessions');
@@ -370,13 +377,13 @@ function writeJson(p: string, data: any) {
 	fs.writeFileSync(p, JSON.stringify(data, null, '\t'), 'utf-8');
 }
 
-function normalizePathForCompare(p: string): string {
-	return p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-}
-
 function getWorkspacePaths(): string[] {
 	return (vscode.workspace.workspaceFolders || []).map(f => f.uri.fsPath);
 }
+
+// 本窗口身份:同一窗口的扩展宿主与 MCP 子进程回溯进程树会得到同一个值。
+// 面板可见性判定与 active-window 条目都带上它,避免文件夹重叠时跨窗口显示会话。
+const WINDOW_PID = resolveWindowPid();
 
 // ── window token ──
 
@@ -384,6 +391,7 @@ interface WindowEntry {
 	token: string;
 	timestamp: number;
 	pid: number;
+	windowPid?: number;
 }
 
 function isPidAlive(pid: number): boolean {
@@ -417,8 +425,9 @@ function markThisWindowActive() {
 		if (existing) {
 			existing.timestamp = now;
 			existing.pid = myPid;
+			existing.windowPid = WINDOW_PID ?? undefined;
 		} else {
-			filtered.unshift({ token: currentWindowToken, timestamp: now, pid: myPid });
+			filtered.unshift({ token: currentWindowToken, timestamp: now, pid: myPid, windowPid: WINDOW_PID ?? undefined });
 		}
 		data[ws] = filtered.slice(0, 8);
 	}
@@ -449,6 +458,10 @@ interface SessionMeta {
 	name: string;
 	workspace: string;
 	windowToken?: string;
+	/** 创建会话时 MCP 所属窗口的主进程 pid */
+	windowPid?: number;
+	/** 创建/认领会话的扩展宿主 pid:窗口级唯一身份,用于跨窗口归属判定 */
+	windowOwnerPid?: number;
 	alive: boolean;
 	createdAt: number;
 	lastActiveAt: number;
@@ -459,14 +472,74 @@ const ARCHIVE_THRESHOLD_MS = ARCHIVE_AFTER_DAYS * 24 * 60 * 60 * 1000;
 
 function getSessionsForThisWorkspace(): SessionMeta[] {
 	const sessions = readFileIfChanged<SessionMeta[]>(SESSIONS_FILE, (raw) => Array.isArray(raw) ? raw : null) || [];
-	const wsPaths = getWorkspacePaths().map(normalizePathForCompare);
-	const now = Date.now();
-	return sessions.filter(s => {
-		if (!s.workspace) return true;
-		if (!wsPaths.some(wp => normalizePathForCompare(s.workspace) === wp)) return false;
-		if (!s.alive && (now - s.lastActiveAt) > ARCHIVE_THRESHOLD_MS) return false;
-		return true;
-	});
+	const ctx = buildVisibilityContext();
+	const visible = selectVisibleSessions(sessions, ctx);
+	adoptVisibleSessionOwnership(sessions, visible, ctx);
+	return visible;
+}
+
+/** active-window.json 中形状合法的全部条目(跨所有工作区) */
+function readWindowEntries(): WindowEntry[] {
+	const data = readJson<Record<string, WindowEntry[]>>(ACTIVE_WINDOW_FILE) || {};
+	const entries: WindowEntry[] = [];
+	for (const list of Object.values(data)) {
+		if (!Array.isArray(list)) continue;
+		for (const entry of list) {
+			if (entry && entry.token && entry.pid) entries.push(entry);
+		}
+	}
+	return entries;
+}
+
+function buildVisibilityContext(): VisibilityContext {
+	const entries = readWindowEntries();
+	const alivePids = new Set<number>();
+	for (const entry of entries) {
+		if (isPidAlive(entry.pid)) alivePids.add(entry.pid);
+		if (entry.windowPid && isPidAlive(entry.windowPid)) alivePids.add(entry.windowPid);
+	}
+	return {
+		workspacePaths: getWorkspacePaths().map(normalizePathForCompare),
+		extensionPid: process.pid,
+		windowPid: WINDOW_PID,
+		windowToken: currentWindowToken,
+		windowEntries: entries.map(e => ({ token: e.token, pid: e.pid, windowPid: e.windowPid })),
+		alivePids,
+		now: Date.now(),
+		archiveThresholdMs: ARCHIVE_THRESHOLD_MS,
+	};
+}
+
+/**
+ * 认领可见会话的归属:没有活着的持有者时把本窗口身份写回会话元数据。
+ * 不做这一步,窗口关闭/重载后老会话会同时出现在文件夹重叠的多个窗口面板里。
+ */
+function adoptVisibleSessionOwnership(all: SessionMeta[], visible: SessionMeta[], ctx: VisibilityContext) {
+	const adopted: string[] = [];
+	for (const session of visible) {
+		if (!needsOwnershipAdoption(session, ctx)) continue;
+		session.windowOwnerPid = process.pid;
+		if (!session.windowToken) session.windowToken = currentWindowToken;
+		if (!session.windowPid && WINDOW_PID) session.windowPid = WINDOW_PID;
+		adopted.push(session.id);
+	}
+	if (adopted.length === 0) return;
+	writeJson(SESSIONS_FILE, all);
+	output?.appendLine(`[ownership] adopted ${adopted.length} session(s) for this window: ${adopted.join(', ')}`);
+}
+
+/**
+ * default 队列里的消息没有会话归属。不再自动投递给任意会话(会串到无关对话),
+ * 只提示用户按文件内容手动派发:scripts/ms-dispatch.mjs dispatch --session <id> --task "..."
+ */
+function warnAboutUnownedDefaultQueue() {
+	const queuePath = path.join(SESSIONS_DIR, 'default', 'queue.json');
+	const queue = readJson<any[]>(queuePath);
+	if (!Array.isArray(queue) || queue.length === 0) return;
+	output.appendLine(`[default-queue] ${queue.length} unowned message(s) left at ${queuePath}`);
+	vscode.window.showWarningMessage(
+		`MultiSession: 有 ${queue.length} 条消息没有会话归属,未投递(${queuePath})。请在面板中选择会话后重新发送。`
+	);
 }
 
 // ── slash commands (panel-side) ──
@@ -1145,7 +1218,14 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 					break;
 
 			case 'text': {
-				const sid = msg.sessionId || 'default';
+				// 没有会话归属的消息过去会落进 sessions/default/queue.json,再被「迁移」到
+				// 下一个注册的会话——这是不同对话互相收到消息的通道之一,这里直接拒绝。
+				const sid = (msg.sessionId || '').trim();
+				if (!sid) {
+					output.appendLine('[msg] rejected: no session bound to this panel');
+					vscode.window.showWarningMessage('MultiSession: 当前没有选中的会话,消息未发送。请先在面板中选择一个会话。');
+					break;
+				}
 				const textContent = (msg.text || '').trim();
 
 				// intercept slash commands — handle locally, don't push to queue
@@ -2041,6 +2121,7 @@ export function activate(ctx: vscode.ExtensionContext) {
 	ensureDir(DATA_ROOT);
 	ensureDir(SESSIONS_DIR);
 	ensureDir(path.join(SESSIONS_DIR, 'default'));
+	warnAboutUnownedDefaultQueue();
 
 	// 多文件夹工作区去重：只在第一个 folder 保留 MultiSession MCP 配置，
 	// 清理其余 folder 的重复配置，防止 Cursor 为同一 MCP 启动多个子进程。
