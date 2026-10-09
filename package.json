@@ -88,7 +88,7 @@
 	},
 	"scripts": {
 	"compile:wechat": "esbuild src/wechat/engine.ts --bundle --outfile=dist/wechat-engine.js --format=cjs --platform=node --minify",
-	"compile:shared": "esbuild src/shared/file-cache.ts --bundle --outfile=dist/file-cache.mjs --format=esm --platform=node",
+	"compile:shared": "esbuild src/shared/file-cache.ts --bundle --outfile=dist/file-cache.mjs --format=esm --platform=node && esbuild src/shared/locked-json.ts --bundle --outfile=dist/locked-json.mjs --format=esm --platform=node",
 		"compile:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:./wechat-engine.js --format=cjs --platform=node --minify",
 		"compile:css": "node -e \"const fs=require('fs');fs.copyFileSync('src/webview/webview.css','dist/webview.css');fs.copyFileSync('src/wechat-webview/wechat.css','dist/wechat-webview.css');fs.mkdirSync('dist/hooks',{recursive:true});fs.copyFileSync('src/hooks/check-queue.sh','dist/hooks/check-queue.sh');fs.chmodSync('dist/hooks/check-queue.sh',0o755)\"",
 		"compile:webview": "esbuild src/webview/index.tsx --bundle --outfile=dist/webview.js --format=iife --platform=browser --minify && npm run compile:css",
@@ -103,7 +103,7 @@
 		"deploy": "npm run build && node scripts/deploy.js",
 		"release": "node scripts/release.js",
 		"dev": "node scripts/watch.js",
-	"test:e2e": "npm run compile:shared && npm run compile:mcp && node tests/file-cache-unit.mjs && node tests/takeover-e2e.mjs && node tests/dispatch-cli-e2e.mjs && node tests/isolation-e2e.mjs && node tests/visibility-unit.mjs",
+	"test:e2e": "npm run compile:shared && npm run compile:mcp && node tests/file-cache-unit.mjs && node tests/locked-json-unit.mjs && node tests/takeover-e2e.mjs && node tests/dispatch-cli-e2e.mjs && node tests/isolation-e2e.mjs && node tests/visibility-unit.mjs",
 	"bench:memory": "npm run compile:shared && node tests/memory-closed-sessions-bench.mjs 15",
 	"bench:tick": "npm run compile:shared && node tests/memory-tick-bench.mjs 15",
 		"package": "npm run build && npx @vscode/vsce package --no-dependencies"

@@ -5,6 +5,7 @@ import * as os from 'os';
 import { ChildProcess, spawn, execSync, execFile } from 'child_process';
 import { DATA_ROOT } from './shared/data-root';
 import { createFileCache } from './shared/file-cache';
+import { updateJsonLocked } from './shared/locked-json';
 import { resolveWindowPid } from './shared/window-identity';
 import {
 	selectVisibleSessions,
@@ -389,46 +390,52 @@ function isPidAlive(pid: number): boolean {
 function markThisWindowActive() {
 	const wsPaths = getWorkspacePaths();
 	if (wsPaths.length === 0) return;
-	const data = readJson<Record<string, WindowEntry[]>>(ACTIVE_WINDOW_FILE) || {};
 	const now = Date.now();
 	const myPid = process.pid;
-	for (const ws of wsPaths) {
-		const entries = data[ws] || [];
-		// 剔除:过期 + 死进程 + 与当前 pid 相同但 token 不同(防止重启残留)
-		const filtered = entries.filter(e => {
-			if (!e || !e.token || !e.pid) return false;
-			if ((now - e.timestamp) > WINDOW_STALE_MS) return false;
-			if (!isPidAlive(e.pid)) return false;
-			if (e.pid === myPid && e.token !== currentWindowToken) return false;
-			return true;
-		});
-		const existing = filtered.find(e => e.token === currentWindowToken);
-		if (existing) {
-			existing.timestamp = now;
-			existing.pid = myPid;
-			existing.windowPid = WINDOW_PID ?? undefined;
-		} else {
-			filtered.unshift({ token: currentWindowToken, timestamp: now, pid: myPid, windowPid: WINDOW_PID ?? undefined });
+	// 多个窗口的扩展宿主共写这一份心跳文件:必须带锁读改写,否则后写的进程会覆盖掉
+	// 别窗口刚续的心跳 —— 它的条目凭空消失一个周期,期间别窗口可能认领它的会话。
+	updateJsonLocked<Record<string, WindowEntry[]>>(ACTIVE_WINDOW_FILE, (current) => {
+		const data = current || {};
+		for (const ws of wsPaths) {
+			const entries = data[ws] || [];
+			// 剔除:过期 + 死进程 + 与当前 pid 相同但 token 不同(防止重启残留)
+			const filtered = entries.filter(e => {
+				if (!e || !e.token || !e.pid) return false;
+				if ((now - e.timestamp) > WINDOW_STALE_MS) return false;
+				if (!isPidAlive(e.pid)) return false;
+				if (e.pid === myPid && e.token !== currentWindowToken) return false;
+				return true;
+			});
+			const existing = filtered.find(e => e.token === currentWindowToken);
+			if (existing) {
+				existing.timestamp = now;
+				existing.pid = myPid;
+				existing.windowPid = WINDOW_PID ?? undefined;
+			} else {
+				filtered.unshift({ token: currentWindowToken, timestamp: now, pid: myPid, windowPid: WINDOW_PID ?? undefined });
+			}
+			data[ws] = filtered.slice(0, 8);
 		}
-		data[ws] = filtered.slice(0, 8);
-	}
-	writeJson(ACTIVE_WINDOW_FILE, data);
+		return data;
+	});
 }
 
 function removeThisWindowActive() {
 	try {
-		const data = readJson<Record<string, WindowEntry[]>>(ACTIVE_WINDOW_FILE);
-		if (!data) return;
-		let changed = false;
-		for (const ws of Object.keys(data)) {
-			const before = data[ws] || [];
-			const after = before.filter(e => e.token !== currentWindowToken);
-			if (after.length !== before.length) {
-				data[ws] = after;
-				changed = true;
+		// 退场清理同样要带锁:否则会把别的窗口刚写的心跳一起覆盖掉
+		updateJsonLocked<Record<string, WindowEntry[]>>(ACTIVE_WINDOW_FILE, (current) => {
+			if (!current) return undefined;
+			let changed = false;
+			for (const ws of Object.keys(current)) {
+				const before = current[ws] || [];
+				const after = before.filter(e => e.token !== currentWindowToken);
+				if (after.length !== before.length) {
+					current[ws] = after;
+					changed = true;
+				}
 			}
-		}
-		if (changed) writeJson(ACTIVE_WINDOW_FILE, data);
+			return changed ? current : undefined;
+		});
 	} catch { /* ignore */ }
 }
 
