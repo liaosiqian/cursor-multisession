@@ -13,6 +13,8 @@
  *   node scripts/cdp-eval.mjs insert '<text>' [--target page]
  *   node scripts/cdp-eval.mjs enter [--target page]
  *   node scripts/cdp-eval.mjs shot <path.png> [--target page]
+ *   node scripts/cdp-eval.mjs raw <Cdp.Method> ['<json 参数>'] [--target node] [--port 9401]
+ *     —— 直接发任意 CDP 方法,调试扩展宿主时用(例:raw HeapProfiler.collectGarbage --target node)
  */
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -230,6 +232,10 @@ async function main() {
 			const shot = await cdp.call('Page.captureScreenshot', { format: 'png' }, 120000);
 			fs.writeFileSync(rest[1] || '/tmp/cdp-shot.png', Buffer.from(shot.data, 'base64'));
 			console.log('saved ' + (rest[1] || '/tmp/cdp-shot.png'));
+		} else if (command === 'raw') {
+			// 直接发任意 CDP 方法,例如给扩展宿主发 HeapProfiler.collectGarbage 看真实常驻内存
+			const out = await cdp.call(rest[1], rest[2] ? JSON.parse(rest[2]) : {}, 120000);
+			console.log(JSON.stringify(out).slice(0, 4000));
 		} else {
 			throw new Error('未知命令: ' + command);
 		}
