@@ -1221,7 +1221,9 @@ class MultiSessionViewProvider implements vscode.WebviewViewProvider {
 				// 没有会话归属的消息过去会落进 sessions/default/queue.json,再被「迁移」到
 				// 下一个注册的会话——这是不同对话互相收到消息的通道之一,这里直接拒绝。
 				const sid = (msg.sessionId || '').trim();
-				if (!sid) {
+				// 'default' 是历史遗留的「无归属」队列标识,任何发送方都不该再往里写,
+				// 否则又会变成一条没有主人、可被误投递的消息。
+				if (!sid || sid === 'default') {
 					output.appendLine('[msg] rejected: no session bound to this panel');
 					vscode.window.showWarningMessage('MultiSession: 当前没有选中的会话,消息未发送。请先在面板中选择一个会话。');
 					break;

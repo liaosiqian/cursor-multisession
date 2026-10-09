@@ -463,11 +463,12 @@ function App() {
 				break;
 			}
 			if (msg.text) {
-				if (voiceModeRef.current) {
+				// 语音直发同样不能退化到 default 队列;没有会话时把转写结果留在输入框里
+				if (voiceModeRef.current && activeSessionId) {
 					vscode.postMessage({
 						type: 'text',
 						text: msg.text,
-						sessionId: activeSessionId || 'default',
+						sessionId: activeSessionId,
 						images: [],
 					});
 				} else if (editorRef.current) {
@@ -535,15 +536,23 @@ function App() {
 		if (!text && files.length === 0 && imgList.length === 0) return;
 		lastUserActivityRef.current = Date.now();
 
+		// 没有选中会话时不再退化成 default 队列:那里的消息没有归属,历史上会被迁移给
+		// 下一个注册的会话(跨对话串消息的通道之一)。改由扩展侧拒绝并提示,草稿留在输入框,
+		// 便于用户先选会话再重发。
+		if (!activeSessionId) {
+			vscode.postMessage({ type: 'text', text, sessionId: '', images: [] });
+			return;
+		}
+
 		vscode.postMessage({
 			type: 'text',
 			text,
-			sessionId: activeSessionId || 'default',
+			sessionId: activeSessionId,
 			images: imgList.map(img => ({ name: img.name, dataUrl: img.dataUrl })),
 		});
 		if (editorRef.current) editorRef.current.innerHTML = '';
 		setInputText('');
-		setDraftsMap(d => { const n = { ...d }; delete n[activeSessionId || 'default']; return n; });
+		setDraftsMap(d => { const n = { ...d }; delete n[activeSessionId]; return n; });
 		setSharedFiles([]);
 		setImages([]);
 		editorRef.current?.focus();
