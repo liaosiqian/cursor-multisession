@@ -133,6 +133,8 @@ npm run test:e2e
 `tests/dispatch-cli-e2e.mjs` 覆盖 CLI 派发、送达/回复判定与账本幂等。
 `tests/isolation-e2e.mjs` 覆盖会话归属(干活中的会话不被抢 / 心跳新鲜不可抢 / 真失活仍可回收 / 跨工作区不认领)。
 `tests/visibility-unit.mjs` 覆盖面板可见性判定(跨窗口归属 / 工作区范围 / 归档 / 归属认领 / 状态裁剪)。
+`tests/file-cache-unit.mjs` 覆盖文件缓存语义(命中跳过解析 / 变更重解析 / 文件消失 / 派生失败 /
+已关闭会话淘汰 / 上限清空 / stats 一致),即「已关闭会话占内存」那条修复的确定性断言。
 以上都使用临时数据根,不动在用的 `~/.multisession`。
 
 内存测量:
@@ -141,3 +143,7 @@ npm run test:e2e
 npm run bench:tick               # tick 读盘解析量(真实数据根,只读)
 npm run bench:memory             # 「已关闭会话占内存」对照:旧/新实现在独立进程各跑一遍
 ```
+
+两个 bench 的「新实现」阶段直接调用 `src/shared/file-cache.ts` 的编译产物
+(`dist/file-cache.mjs`),测的就是扩展宿主每轮 tick 真正跑的代码,不是复刻一份等价算法;
+bench 脚本会先自动执行 compile:shared。

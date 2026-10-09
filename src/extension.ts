@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { ChildProcess, spawn, execSync, execFile } from 'child_process';
 import { DATA_ROOT } from './shared/data-root';
+import { createFileCache } from './shared/file-cache';
 import { resolveWindowPid } from './shared/window-identity';
 import {
 	selectVisibleSessions,
@@ -340,36 +341,16 @@ function readJson<T = any>(p: string): T | null {
 // 每次约 5MB 临时对象),会话关闭后仍会被反复解析,把扩展宿主内存和 GC 压力顶高。
 // 这里用 mtime + size 判断文件是否变化:未变化直接复用上次结果,变化了才重新解析;
 // 派生结果只保留渲染需要的日志尾部窗口,避免整份日志常驻内存。
-const FILE_CACHE_LIMIT = 512;
-interface FileCacheEntry { mtimeMs: number; size: number; value: any; }
-const fileCache = new Map<string, FileCacheEntry>();
+// 实现见 src/shared/file-cache.ts:抽出去是为了让内存对照脚本能测真实现。
+const fileCache = createFileCache();
 
 function readFileIfChanged<T>(p: string, derive: (raw: any) => T | null): T | null {
-	let stat: fs.Stats;
-	try { stat = fs.statSync(p); } catch {
-		fileCache.delete(p);
-		return null;
-	}
-	const hit = fileCache.get(p);
-	if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
-		return hit.value as T;
-	}
-	const value = derive(readJson(p));
-	if (value === null) {
-		fileCache.delete(p);
-		return null;
-	}
-	if (fileCache.size >= FILE_CACHE_LIMIT) fileCache.clear();
-	fileCache.set(p, { mtimeMs: stat.mtimeMs, size: stat.size, value });
-	return value;
+	return fileCache.read<T>(p, derive);
 }
 
 /** 丢弃不再可见会话的缓存,释放已关闭会话占用的内存。 */
 function evictFileCacheForRemovedSessions(activeIds: Set<string>) {
-	for (const key of [...fileCache.keys()]) {
-		const sid = path.basename(path.dirname(key));
-		if (!activeIds.has(sid)) fileCache.delete(key);
-	}
+	fileCache.evictForRemovedSessions(activeIds);
 }
 
 function writeJson(p: string, data: any) {

@@ -6,6 +6,8 @@
  * chat-log.json,然后复现扩展 tick() 的两种读盘方式,分别在独立进程里跑并测量内存:
  *   A 旧实现:每 tick 对**所有**会话整份解析,派生结果缓存后从不淘汰
  *   B 新实现:只对可见会话读盘,且 mtime+size 未变则跳过解析;已关闭会话的缓存被淘汰
+ *     B 阶段直接调用 src/shared/file-cache.ts 的真实现(编译产物 dist/file-cache.mjs),
+ *     不是复刻一份等价算法 —— 否则测到的是模型,不是扩展里真正跑的代码。
  *
  * 用法: node tests/memory-closed-sessions-bench.mjs [每阶段秒数]
  */
@@ -14,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createFileCache } from '../dist/file-cache.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const TICK_MS = 500;
@@ -49,6 +52,8 @@ function buildRoot() {
 async function runPhase(mode, seconds, root) {
 	const sessions = JSON.parse(fs.readFileSync(path.join(root, 'sessions.json'), 'utf-8'));
 	const visible = new Set(JSON.parse(fs.readFileSync(path.join(root, 'visible.json'), 'utf-8')));
+	// B 阶段用扩展里的真实现;A 阶段(旧实现对照组)保留一份最小复刻
+	const realCache = mode === 'B' ? createFileCache() : null;
 	const cache = new Map();
 	const lastPushed = new Map();
 	let parseCount = 0;
@@ -58,23 +63,16 @@ async function runPhase(mode, seconds, root) {
 		const file = path.join(root, 'sessions', session.id, 'chat-log.json');
 		const isVisible = visible.has(session.id);
 		if (!isVisible && mode === 'B') {
-			// 已关闭会话:面板不再显示,直接丢弃它的缓存条目
-			cache.delete(file);
+			// 已关闭会话:面板不再显示,不读盘;它的缓存条目由每轮的淘汰清掉
 			lastPushed.delete(session.id);
 			return;
 		}
 		if (mode === 'B') {
-			const stat = fs.statSync(file);
-			const hit = cache.get(file);
-			if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
-				lastPushed.set(session.id, hit.window.length);
-				return;
-			}
-			const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
-			parseCount++;
-			bytesParsed += stat.size;
-			cache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, window: raw.slice(-MAX_VISIBLE_LOGS) });
-			lastPushed.set(session.id, Math.min(raw.length, MAX_VISIBLE_LOGS));
+			// 真实现:未变化直接复用上次派生结果,派生结果只留日志尾部窗口
+			const window = realCache.read(file, (raw) => (Array.isArray(raw)
+				? { logs: raw.slice(-MAX_VISIBLE_LOGS), totalCount: raw.length }
+				: null));
+			lastPushed.set(session.id, window ? window.logs.length : 0);
 			return;
 		}
 		// A:旧实现,每次整份解析并保留派生结果,从不淘汰
@@ -91,6 +89,8 @@ async function runPhase(mode, seconds, root) {
 	const t0 = process.hrtime.bigint();
 	const ticks = Math.round((seconds * 1000) / TICK_MS);
 	for (let tick = 0; tick < ticks; tick++) {
+		// 扩展 tick 每轮按「仍可见会话」淘汰缓存(evictFileCacheForRemovedSessions)
+		if (realCache) realCache.evictForRemovedSessions(visible);
 		for (const session of sessions) readSession(session);
 		const used = process.memoryUsage().heapUsed;
 		if (used > heapPeak) heapPeak = used;
@@ -105,10 +105,11 @@ async function runPhase(mode, seconds, root) {
 	const label = mode === 'A' ? 'A 旧实现:全部会话每 tick 整份解析,不淘汰' : 'B 新实现:只读可见会话 + mtime 跳过 + 淘汰已关闭会话';
 	console.log('[' + label + ']');
 	console.log('  会话 ' + sessions.length + ' 个(可见 ' + visible.size + ' / 已关闭 ' + (sessions.length - visible.size) + ') | tick ' + ticks + ' 次');
-	console.log('  实际解析 ' + parseCount + ' 次 / ' + (bytesParsed / 1048576).toFixed(1) + ' MB ( ' + (bytesParsed / 1048576 / (elapsedMs / 1000)).toFixed(1) + ' MB/s )');
+	const stats = realCache ? realCache.stats() : { parses: parseCount, bytes: bytesParsed, entries: cache.size };
+	console.log('  实际解析 ' + stats.parses + ' 次 / ' + (stats.bytes / 1048576).toFixed(1) + ' MB ( ' + (stats.bytes / 1048576 / (elapsedMs / 1000)).toFixed(1) + ' MB/s )');
 	console.log('  heapUsed 起/峰/末(GC 后): ' + (start.heapUsed / 1048576).toFixed(1) + ' / ' + (heapPeak / 1048576).toFixed(1) + ' / ' + (end.heapUsed / 1048576).toFixed(1) + ' MB');
 	console.log('  rss 起/末: ' + (start.rss / 1048576).toFixed(1) + ' / ' + (end.rss / 1048576).toFixed(1) + ' MB');
-	console.log('  留存缓存条目: ' + cache.size + ' / 会话数 ' + sessions.length);
+	console.log('  留存缓存条目: ' + stats.entries + ' / 会话数 ' + sessions.length);
 }
 
 async function main() {

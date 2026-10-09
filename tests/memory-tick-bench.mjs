@@ -5,7 +5,7 @@
  * 复现扩展 tick() 的读盘模式:每 500ms 对每个会话 readFileSync + JSON.parse(chat-log.json)。
  * 对比两种实现,分别在**独立进程**里跑,避免相互污染:
  *   A 现状:每次整份解析(解析结果随后丢弃,但分配过程持续制造垃圾)
- *   B 修复:mtime+size 未变化时跳过解析(等价于扩展侧 readFileIfChanged)
+ *   B 修复:调用 src/shared/file-cache.ts 的真实现,mtime+size 未变化时跳过解析
  *
  * 用法: node --expose-gc tests/memory-tick-bench.mjs [每阶段秒数]
  */
@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createFileCache } from '../dist/file-cache.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const MAX_VISIBLE_LOGS = 50;
@@ -36,7 +37,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function runPhase(mode, seconds) {
 	const targets = targetsFor(DATA_ROOT);
-	const cache = new Map();
+	// B 阶段跑扩展里的真实现(未变化跳过解析),A 阶段保留旧行为的对照
+	const realCache = mode === 'B' ? createFileCache() : null;
 	let bytesParsed = 0;
 	let parseCount = 0;
 	let readCount = 0;
@@ -44,10 +46,10 @@ async function runPhase(mode, seconds) {
 	function readOnce(file, size) {
 		readCount++;
 		if (mode === 'B') {
-			const stat = fs.statSync(file);
-			const hit = cache.get(file);
-			if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return;
-			cache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size });
+			realCache.read(file, (raw) => (Array.isArray(raw)
+				? { logs: raw.slice(-MAX_VISIBLE_LOGS), totalCount: raw.length }
+				: null));
+			return;
 		}
 		const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
 		bytesParsed += size;
@@ -73,8 +75,9 @@ async function runPhase(mode, seconds) {
 
 	const label = mode === 'A' ? 'A 现状:每次整份解析' : 'B 修复:mtime+size 未变则跳过解析';
 	console.log('[' + label + ']');
-	console.log('  会话数 ' + targets.length + ' | tick ' + ticks + ' 次 | 读取 ' + readCount + ' 次 | 实际解析 ' + parseCount + ' 次');
-	console.log('  实际解析 ' + (bytesParsed / 1048576).toFixed(1) + ' MB ( ' + (bytesParsed / 1048576 / (elapsedMs / 1000)).toFixed(1) + ' MB/s )');
+	const stats = realCache ? realCache.stats() : { parses: parseCount, bytes: bytesParsed };
+	console.log('  会话数 ' + targets.length + ' | tick ' + ticks + ' 次 | 读取 ' + readCount + ' 次 | 实际解析 ' + stats.parses + ' 次');
+	console.log('  实际解析 ' + (stats.bytes / 1048576).toFixed(1) + ' MB ( ' + (stats.bytes / 1048576 / (elapsedMs / 1000)).toFixed(1) + ' MB/s )');
 	console.log('  heapUsed 起/峰/末(GC 后): ' + (start.heapUsed / 1048576).toFixed(1) + ' / ' + (heapPeak / 1048576).toFixed(1) + ' / ' + (end.heapUsed / 1048576).toFixed(1) + ' MB');
 	console.log('  rss 起/末: ' + (start.rss / 1048576).toFixed(1) + ' / ' + (end.rss / 1048576).toFixed(1) + ' MB');
 }
@@ -106,4 +109,3 @@ async function main() {
 }
 
 main().catch((error) => { console.error('测量失败: ' + (error?.message ?? error)); process.exit(1); });
-
