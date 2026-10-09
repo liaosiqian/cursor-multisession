@@ -105,6 +105,7 @@
 		"dev": "node scripts/watch.js",
 	"test:e2e": "npm run compile:shared && npm run compile:mcp && node tests/file-cache-unit.mjs && node tests/locked-json-unit.mjs && node tests/takeover-e2e.mjs && node tests/dispatch-cli-e2e.mjs && node tests/isolation-e2e.mjs && node tests/visibility-unit.mjs",
 	"bench:memory": "npm run compile:shared && node tests/memory-closed-sessions-bench.mjs 15",
+	"stress:heartbeat": "npm run compile:shared && node scripts/heartbeat-stress.mjs",
 	"bench:tick": "npm run compile:shared && node tests/memory-tick-bench.mjs 15",
 		"package": "npm run build && npx @vscode/vsce package --no-dependencies"
 	},

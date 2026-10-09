@@ -31,8 +31,10 @@ unit/e2e 只覆盖判定函数。归属泄漏最终要在「真实的扩展宿�
    同一批文件夹下多个面板同时抢认领，观测就没意义了。
 4. 等两个窗口的扩展宿主写进 `data-new/active-window.json`（拿 A/B 的 `pid`、`windowPid`、`token`），
    再写 `data-new/sessions.json` 夹具（每个会话建好 `sessions/<id>/{queue.json,chat-log.json}`）。
-5. 夹具写入后**不要**再从外部改 `active-window.json`：外部读改写会覆盖扩展宿主的心跳更新，
-   制造出「另一个活窗口的条目瞬间消失」的假象，导致对方会话被误认领。
+5. 夹具写入后**不要**用无锁的读改写去动 `active-window.json`：那种写法会盖掉扩展宿主刚续的心跳，
+   制造出「另一个活窗口的条目停更、甚至被当成陈旧项清掉」的假象，导致对方会话被误认领。
+   现在扩展侧走的是同一把跨进程锁，外部写者用 `dist/locked-json.mjs` 的 `updateJsonLocked()`
+   就安全；用 `scripts/heartbeat-stress.mjs` 可以直接压测这一点。
 
 ## 夹具与预期
 
@@ -107,6 +109,36 @@ unit/e2e 只覆盖判定函数。归属泄漏最终要在「真实的扩展宿�
 可选路径（都需要用户决定）：把主 profile 的两行 `cursorAuth/*` 拷进隔离目录后重启窗口；在隔离
 窗口手动登录；或使用已登录的 `cursor-agent` CLI（需要 `agent login` 或 `CURSOR_API_KEY`）。
 登录态就位后即可用下面的 CDP 工具把这一环跑完，不受锁屏影响。
+
+## 心跳竞态：真实窗口下的压测（2026-10-09）
+
+`scripts/heartbeat-stress.mjs` 在真实运行的窗口旁边持续读改写 `active-window.json`，每 100ms 采样一次，
+看两个活窗口的心跳条目会不会丢失、时间戳会不会停更（扩展宿主每 3s 续一次，超过 6s 就算被打断）：
+
+```bash
+# 两个隔离窗口共享 MULTISESSION_DATA_ROOT=<临时数据根>
+MULTISESSION_DATA_ROOT=$ISO/data-heart node scripts/heartbeat-stress.mjs --mode locked --seconds 20
+MULTISESSION_DATA_ROOT=$ISO/data-heart node scripts/heartbeat-stress.mjs --mode naive  --seconds 90
+MULTISESSION_DATA_ROOT=$ISO/data-heart node scripts/heartbeat-stress.mjs --mode stale  --seconds 60
+```
+
+| 写者 | 写回次数 | 条目缺失的采样 | 心跳时间戳年龄（中位 / p99 / 最大） |
+|------|---------|---------------|--------------------------------|
+| `locked`（当前实现） | 9,698 次 / 12s | 0 / 119 | 1.5s / 3.0s / 3.05s |
+| `locked`（长跑） | 16,314 次 / 20s | 0 / 198 | 1.5s / 3.0s / 3.01s |
+| `naive`（0.8.0 老写法，读→改→写） | 143,415 次 / 180s | 0 / 1795 | 1.8s / 8.8s / 11.97s |
+| `stale`（无锁 + 旧快照反复写回） | 50,909 次 / 60s | 0 / 598 | 32.2s / 61.6s / 62.09s |
+
+结论：加锁后即使旁边有每秒近千次的写回，两个窗口的心跳也始终跟着 3s 周期走（最大 3.05s）；
+换成老的无锁写法，同样压力下心跳会被反复盖掉，最坏情况（旧快照写回）整个测试期间都停在原地 ——
+两个窗口互相看对方都是「15s 没心跳的陈旧条目」，正是会话在窗口之间跳动的来源。
+
+两个写者都保留条目本身（各自都做了 read-modify-write），所以这一轮没有观测到「条目整条消失」；
+条目消失发生在陈旧条目被另一个窗口按 15s 阈值清掉、而对方的写回又一直没落地的时刻，
+`tests/locked-json-unit.mjs` 的对照组用确定性交错复现了这条丢失路径。
+
+**上线含义**：0.8.0 的窗口仍在用无锁写回，会和已升级窗口互相盖心跳。接管时要让所有窗口一起
+升级并重启到同一版本，不要长期混跑新旧两代。
 
 ## 无需解锁屏幕的驱动方式：CDP（2026-10-09 实测）
 
