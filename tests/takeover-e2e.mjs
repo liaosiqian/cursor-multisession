@@ -100,7 +100,6 @@ async function main() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms-takeover-e2e-'));
 	const realRoot = path.join(os.homedir(), '.multisession');
 	const realSessionsPath = path.join(realRoot, 'sessions.json');
-	const realBefore = fs.existsSync(realSessionsPath) ? fs.statSync(realSessionsPath).mtimeMs : 0;
 
 	console.log('隔离数据根: ' + root);
 
@@ -195,8 +194,9 @@ async function main() {
 	finishing.catch(() => null);
 
 	console.log('[6] 数据根隔离');
-	const realAfter = fs.existsSync(realSessionsPath) ? fs.statSync(realSessionsPath).mtimeMs : 0;
-	check(realBefore === realAfter, '在用数据根 sessions.json 未被改动');
+	// 在用数据根由正在运行的 Cursor 实例持续写入,mtime 不足以判定;比对内容里是否出现测试会话
+	const realText = fs.existsSync(realSessionsPath) ? fs.readFileSync(realSessionsPath, 'utf-8') : '';
+	check(!realText.includes(sid), '在用数据根未出现测试会话');
 	check(fs.existsSync(path.join(root, 'sessions.json')), '所有状态写入临时数据根');
 
 	fs.rmSync(root, { recursive: true, force: true });

@@ -44,6 +44,9 @@ const MCP_PID = process.pid;
 // 用于防止 tryAdoptOrphan 将"另一个 Compose 正在使用的 session"分配给新 Compose。
 // Node.js 单线程 + 同进程内存 → 无需文件锁。
 const activelyPolledSessions = new Set<string>();
+// 本进程服务过的 session。同一窗口内切换模式/重开对话时,直接续用自己服务过的会话,
+// 这是唯一"无需证明旧持有者已死"就可以续用的情形。
+const servedSessions = new Set<string>();
 
 // ── helpers ──
 
@@ -217,12 +220,29 @@ function tryAdoptOrphan(workspace: string, windowToken: string | null): string |
 	const wsSessions = sessions.filter(s => s.alive && s.workspace === workspace);
 	if (wsSessions.length === 0) return null;
 
-	// Phase 1: 严格 windowToken 匹配——同窗口内 mode-switch / 重启 MCP 走这里恢复。
-	// 排除 activelyPolledSessions: 如果 session 正被另一个 check_messages 调用轮询,
-	// 说明它已有对应 Compose,当前调用来自一个新 Compose,应创建新 session。
+	// Phase 0: 自己服务过的 session(mode-switch / 同一进程内重开对话)续用。
+	// 必须同样要求"当前无活持有者":本进程服务过的 session 很可能属于同窗口另一个
+	// 对话(那个对话正在干活、不在长轮询里),无条件续用会把它的队列直接抢过来。
+	const mine = wsSessions
+		.filter(s => servedSessions.has(s.id)
+			&& !activelyPolledSessions.has(s.id)
+			&& !hasLiveOwner(s))
+		.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+	if (mine.length > 0) {
+		log(`[adopt] reuse own session ${mine[0].id} (age=${now - mine[0].lastActiveAt}ms)`);
+		return mine[0].id;
+	}
+
+	// Phase 1: windowToken 匹配 + 旧持有者确实已静默。
+	// 只按 windowToken 收编会把"同窗口另一个对话正在使用的 session"认走——
+	// 那个 Compose 不在长轮询里(正在干活)时 activelyPolledSessions 是空的,
+	// 于是两个对话共享同一个 session、抢同一个队列,这就是互串。
+	// 因此这里必须额外要求 status 心跳过期、无其它活跃 claim、且在飞任务不属于活进程。
 	if (windowToken) {
 		const tokenMatches = wsSessions
-			.filter(s => s.windowToken === windowToken && !activelyPolledSessions.has(s.id))
+			.filter(s => s.windowToken === windowToken
+				&& !activelyPolledSessions.has(s.id)
+				&& !hasLiveOwner(s))
 			.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
 		if (tokenMatches.length > 0) {
 			log(`[adopt] recovered session ${tokenMatches[0].id} (windowToken match, age=${now - tokenMatches[0].lastActiveAt}ms)`);
@@ -240,6 +260,7 @@ function tryAdoptOrphan(workspace: string, windowToken: string | null): string |
 	const orphans = wsSessions
 		.filter(s => {
 			if (activelyPolledSessions.has(s.id)) return false;
+			if (hasLiveOwner(s)) return false;
 			if ((now - s.lastActiveAt) <= ORPHAN_THRESHOLD_MS) return false;
 			if (s.windowToken && activeTokens.has(s.windowToken)) return false;
 			return true;
@@ -251,6 +272,33 @@ function tryAdoptOrphan(workspace: string, windowToken: string | null): string |
 	}
 
 	return null;
+}
+
+/**
+ * 该 session 当前是否被某个活着的 MCP 进程持有。任一信号成立即认为"有人"。
+ * 判定只用可跨进程观察的事实,不依赖本进程内存。
+ */
+function hasLiveOwner(session: SessionMeta): boolean {
+	const now = Date.now();
+	// 1) 长轮询心跳:每 10s 续期,最直接
+	const status = readJson<any>(path.join(getSessionDir(session.id), 'status.json'));
+	if (status && typeof status.last_heartbeat_at === 'number'
+		&& (now - status.last_heartbeat_at) <= MCP_CLAIM_STALE_MS) {
+		return true;
+	}
+	// 2) 同窗口的其它 MCP claim 仍在续期
+	if (session.windowToken) {
+		const claim = readMcpClaims().find(c => c.windowToken === session.windowToken && c.mcpPid !== MCP_PID);
+		if (claim && (now - claim.lastSeenAt) <= MCP_CLAIM_STALE_MS) return true;
+	}
+	// 3) 在飞任务(已消费但未收尾)的持有进程还活着。
+	// 这里不排除本进程:若本进程正持有某 session 的未完成任务,说明该 session 属于
+	// 本进程正在服务的对话,任何"不带 session_id 的首次调用"都不应把它认走。
+	const inflight = readInflight(session.id);
+	if (inflight && !inflight.completed_at && isPidAlive(inflight.mcp_pid)) {
+		return true;
+	}
+	return false;
 }
 
 // ── session cleanup ──
@@ -596,6 +644,7 @@ server.tool(
 		// 标记此 session 为"正在被轮询"，防止其他 check_messages 调用通过
 		// tryAdoptOrphan 将同一 session 分配给不同的 Compose 面板。
 		activelyPolledSessions.add(sid);
+		servedSessions.add(sid);
 		log(`[poll-lock] ${sid} locked (active=${activelyPolledSessions.size})`);
 
 		try {

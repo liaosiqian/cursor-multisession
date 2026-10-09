@@ -102,7 +102,7 @@
 		"deploy": "npm run build && node scripts/deploy.js",
 		"release": "node scripts/release.js",
 		"dev": "node scripts/watch.js",
-		"test:e2e": "npm run compile:mcp && node tests/takeover-e2e.mjs && node tests/dispatch-cli-e2e.mjs",
+		"test:e2e": "npm run compile:mcp && node tests/takeover-e2e.mjs && node tests/dispatch-cli-e2e.mjs && node tests/isolation-e2e.mjs",
 		"package": "npm run build && npx @vscode/vsce package --no-dependencies"
 	},
 	"dependencies": {

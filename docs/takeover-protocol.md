@@ -56,6 +56,32 @@ MultiSession 的 MCP 是 stdio 通道,由 Cursor 独占,外部进程无法直接
    未完成任务原文交还 Agent 续做(`replay_count` 最多 2 次)。
 4. **已回复**:`inflight.completed_at` 或 `summary.ts` 刷新 —— 读取 `summary.json`/`chat-log.json` 拿结果。
 
+## 会话归属与隔离
+
+首次调用(不带 `session_id`)时,MCP 只在**确认该会话没有活持有者**后才会收编它。
+活持有者判定(`hasLiveOwner`)任一成立即视为有人:
+
+1. `status.last_heartbeat_at` ≤30s(有 Composer 正在长轮询);
+2. 同窗口 token 的其它 MCP claim 仍在续期;
+3. `inflight.json` 未收尾且其 `mcp_pid` 仍存活(**含本进程自己**持有的在飞任务)。
+
+收编顺序:本进程服务过且无活持有者的会话 → 同窗口 token 且无活持有者的会话 →
+失活超 30s 且窗口 token 已失效的 orphan。都不满足就**新建会话**。
+
+| 现象 | 成因 | 对应规则 |
+|------|------|----------|
+| 同窗口两个对话抢同一队列 | 只按 windowToken 收编;干活中的对话不在长轮询里,看起来没人 | 必须有活持有者判定 |
+| 跨工作区收到别人的消息 | 多根工作区里 `process.cwd()` 只是第一个文件夹;单会话兜底收编 | 只收编本 workspace,不做单会话兜底 |
+| 关闭的对话仍占内存 | tick 每轮全量读盘、日志无限增长 | 读盘按 mtime/size 变化,日志只留尾部 50 条 |
+
+**同一对话请始终带 `session_id`** —— 它是归属的唯一确证。全新对话新建会话是预期行为,
+不要依赖收编来「继承」上一个对话的上下文。
+
+已知边界:会话心跳在 30s 内仍新鲜、但对话实际已停止(例如 MCP 进程刚被杀)时,
+新对话会先新建会话,旧会话最多 30s 后才进入 orphan 回收窗口。
+
+派发侧不受影响:`dispatch --session <id>` 显式指定目标会话,不走收编逻辑。
+
 ## 工具
 
 ```bash
@@ -78,5 +104,5 @@ npm run test:e2e
 
 `tests/takeover-e2e.mjs` 覆盖派发→消费→在飞记账→幂等去重→断连续做→收尾;
 `tests/dispatch-cli-e2e.mjs` 覆盖 CLI 派发、送达/回复判定与账本幂等。
-两者都使用临时数据根,不动在用的 `~/.multisession`。
-
+`tests/isolation-e2e.mjs` 覆盖会话归属(干活中的会话不被抢 / 心跳新鲜不可抢 / 真失活仍可回收 / 跨工作区不认领)。
+三者都使用临时数据根,不动在用的 `~/.multisession`。
