@@ -57,6 +57,25 @@ cursor --extensions-dir $ISO/ext-vsix --user-data-dir $ISO/ud-vsix \
 3. **确认 MCP 进程指向新路径**：`ps -eo pid,command | grep mcp-server.mjs`，
    路径应指向新的扩展目录。
 
+## 打包产物本身也验过（2026-10-09）
+
+三个协议套件都支持用 `MULTISESSION_MCP_SERVER` 指向别的产物，所以能直接拿 VSIX 里的服务端跑同一套用例：
+
+```bash
+unzip -o -q cursor-multisession-0.9.0.vsix -d /tmp/ms-vsix
+export MULTISESSION_MCP_SERVER=/tmp/ms-vsix/extension/dist/mcp-server.mjs
+node tests/takeover-e2e.mjs && node tests/dispatch-cli-e2e.mjs && node tests/isolation-e2e.mjs
+```
+
+实测：VSIX 里的 `dist/mcp-server.mjs` 与仓库构建产物 sha256 一致（`ba5e1048…`），
+三套用例 30/11/26 全绿 —— 打包出来的服务端与测试过的构建产物是同一份东西。
+
+审批闸门这条也在隔离环境验了：扩展目录换到 `ext-vsix/local.cursor-multisession-0.8.0`、工作区换成
+`ws-vsix` 后，用 `scripts/mcp-approval-key.mjs --config <ws>/.cursor/mcp.json --folder-index 0`
+算出 `project-0-ws-vsix-MultiSession:41c89bc3`，写进用户数据里的 `cursor/approvedProjectMcpServers`
+再重启，Cursor 立刻拉起了 `<ext-vsix>/dist/mcp-server.mjs` 并打出 `[start] MCP server connected`；
+同一份配置在写入审批键之前是完全静默的。
+
 ## 回滚
 
 ```bash
@@ -82,4 +101,3 @@ node scripts/ms-dispatch.mjs status --json
 
 面板侧：目标窗口的面板应出现该会话的消息，回消息后发送方的 `status` 能看到回复；
 把 MCP 进程杀掉再重启，`status` 里那条 in-flight 应被重新投递（`INFLIGHT_REPLAY_LIMIT` 上限 2 次）。
-

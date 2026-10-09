@@ -19,7 +19,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const SERVER_PATH = path.join(REPO_ROOT, 'dist', 'mcp-server.mjs');
+// 默认跑仓库里的构建产物;用 MULTISESSION_MCP_SERVER 指到别处即可拿打包出来的 VSIX 做同一套验证
+const SERVER_PATH = process.env.MULTISESSION_MCP_SERVER?.trim() || path.join(REPO_ROOT, 'dist', 'mcp-server.mjs');
 const CLI_PATH = path.join(REPO_ROOT, 'scripts', 'ms-dispatch.mjs');
 
 let failures = 0;
