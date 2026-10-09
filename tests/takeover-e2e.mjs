@@ -12,6 +12,7 @@
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SERVER_PATH = path.join(REPO_ROOT, 'dist', 'mcp-server.mjs');
+const CLI_PATH = path.join(REPO_ROOT, 'scripts', 'ms-dispatch.mjs');
 
 let failures = 0;
 let checks = 0;
@@ -46,6 +48,28 @@ function writeJson(file, data) {
 
 function sessionDir(root, sid) {
 	return path.join(root, 'sessions', sid);
+}
+
+/** 进程是否还活着(僵尸进程在被回收前仍算存在,故续做判定前需等它真正消失) */
+function isPidAlive(pid) {
+	if (!pid || pid <= 0) return false;
+	try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+}
+
+/** 以临时数据根跑一遍派发 CLI,返回 { code, stdout, stderr } */
+function runCli(root, args, timeoutMs = 30000) {
+	return new Promise((resolve) => {
+		const child = spawn(process.execPath, [CLI_PATH, ...args], {
+			cwd: REPO_ROOT,
+			env: { ...process.env, MULTISESSION_DATA_ROOT: root },
+		});
+		let stdout = '';
+		let stderr = '';
+		child.stdout.on('data', (chunk) => { stdout += chunk; });
+		child.stderr.on('data', (chunk) => { stderr += chunk; });
+		const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+		child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+	});
 }
 
 async function waitFor(predicate, label, timeoutMs = 8000, intervalMs = 100) {
@@ -156,8 +180,21 @@ async function main() {
 	check(inflightB?.dispatch_id === 'd-2' && !inflightB?.completed_at, '任务 B 在飞未完成');
 
 	await stopServer(p1);
-	await sleep(300);
+	await waitFor(() => !isPidAlive(p1.pid), '处理中进程真正退出', 8000, 100);
 	check(true, '已杀掉处理中进程(模拟断连,未回复) pid=' + p1.pid);
+
+	console.log('[3.5] 派发方通过 CLI 判定断连');
+	const cliStatus = await runCli(root, ['status', '--session', sid, '--json']);
+	let cliReport = null;
+	try { cliReport = JSON.parse(cliStatus.stdout); } catch { /* ignore */ }
+	check(cliReport?.[0]?.verdict === 'disconnected(进程已退出,待续做)', 'CLI 判定断连待续做(而非 working)');
+	check(cliReport?.[0]?.inflight?.dispatchId === 'd-2', '断连报告对齐未完成任务 d-2');
+	check(cliReport?.[0]?.inflight?.ownerAlive === false, '断连判定依据 inflight.mcp_pid 已退出');
+	check(cliReport?.[0]?.inflight?.replayCount === 0, '判定时尚未发生续做');
+	const cliHuman = await runCli(root, ['status', '--session', sid]);
+	check(cliHuman.stdout.includes('disconnected'), '人类可读输出同样标识断连');
+	const cliSessions = await runCli(root, ['sessions']);
+	check(cliSessions.code === 0, 'sessions 列表命令可正常执行');
 
 	console.log('[4] 新进程恢复会话 → 未完成任务交还 Agent');
 	const p2 = await startServer(root);
